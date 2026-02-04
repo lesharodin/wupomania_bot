@@ -1,0 +1,10 @@
+.env
+*.db
+__pycache__/
+venv/
+logs/
+*.log
+test.py
+# macOS junk
+.DS_Store
+**/.DS_Store

@@ -14,3 +14,7 @@ def get_connection():
         yield conn
     finally:
         conn.close()
+def get_club_connection():
+    return sqlite3.connect(
+        "/home/lesharodin/whoopclub_bot/database/bot.db"
+    )

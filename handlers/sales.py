@@ -94,6 +94,17 @@ async def buy_ticket(callback: CallbackQuery):
                 "Ты добавлен в лист ожидания.",
                 parse_mode="HTML"
             )
+            await callback.bot.send_message(
+                ADMIN_CHAT_ID,
+                (
+                    "📥 <b>Пользователь добавлен в waitlist</b>\n"
+                    f"👤 @{user.username if user.username else user.full_name}\n"
+                    f"🆔 User ID: <code>{user_id}</code>\n"
+                    f"🏁 Race ID: <code>{race_id}</code>"
+                ),
+                parse_mode="HTML"
+            )
+
             return
 
         slot_id = slot[0]

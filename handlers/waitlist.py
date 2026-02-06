@@ -5,6 +5,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from database.db import get_connection
 from config import ADMIN_CHAT_ID, RESERVE_TIMEOUT_SECONDS
+from payments.service import create_payment
+
 
 
 async def try_assign_from_waitlist(bot, race_id: int):
@@ -67,15 +69,30 @@ async def try_assign_from_waitlist(bot, race_id: int):
         conn.commit()
 
     # ===== дальше БЕЗ БД =====
+    payment_url = create_payment(
+        user_id=user_id,
+        amount=1,
+        target_type="race_slot",
+        target_id=slot_id,
+        chat_id=None,
+        message_id=None,
+        description=(
+            "Вупомания | "
+            f"{fio} | "
+            f"tgid {user_id} | "
+            f"slot {slot_id}"
+        )
+    )
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
-                text="💳 Перейти к оплате",
-                callback_data=f"pay_race:{slot_id}"
+                text="💳 Оплатить через СБП",
+                url=payment_url
             )]
         ]
     )
+
 
     await bot.send_message(
         user_id,

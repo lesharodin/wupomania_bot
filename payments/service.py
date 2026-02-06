@@ -18,7 +18,7 @@ BASE_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..")
 )
 
-DB_PATH = os.path.join(
+CLUB_DB_PATH = os.path.join(
     BASE_DIR,
     "..",                 # выходим из wupomania_bot
     "whoopclub_bot",
@@ -47,7 +47,7 @@ def create_payment(
 
     now = datetime.now().isoformat()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(CLUB_DB_PATH)
     cursor = conn.cursor()
 
     # 1️⃣ записываем payment в БД

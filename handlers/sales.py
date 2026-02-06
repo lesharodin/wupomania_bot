@@ -155,7 +155,7 @@ async def pay_race(callback: CallbackQuery):
         target_id=slot_id,
         chat_id=callback.message.chat.id,
         message_id=callback.message.message_id,
-        description="Участие в гонке «Вупомания»"
+        description="Участие в гонке «Вупомания | tgid {user_id} | slot {slot_id}»"
     )
 
     await callback.message.edit_reply_markup(

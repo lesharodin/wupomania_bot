@@ -18,13 +18,7 @@ BASE_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..")
 )
 
-CLUB_DB_PATH = os.path.join(
-    BASE_DIR,
-    "..",                 # выходим из wupomania_bot
-    "whoopclub_bot",
-    "database",
-    "bot.db"
-)
+CLUB_DB_PATH = "home/lesharodin/whoopclub_bot/database/bot.db"
 
 
 

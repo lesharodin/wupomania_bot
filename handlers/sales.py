@@ -147,6 +147,8 @@ async def buy_ticket(callback: CallbackQuery):
 async def pay_race(callback: CallbackQuery):
     slot_id = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
+    user = callback.from_user
+    username = f"@{user.username}" if user.username else f"id{user.id}"
 
     payment_url = create_payment(
         user_id=user_id,
@@ -155,7 +157,7 @@ async def pay_race(callback: CallbackQuery):
         target_id=slot_id,
         chat_id=callback.message.chat.id,
         message_id=callback.message.message_id,
-        description="Участие в гонке «Вупомания | tgid {user_id} | slot {slot_id}»"
+        description=f"{username} Участие в гонке «Вупомания | tgid {user_id} | slot {slot_id}»"
     )
 
     await callback.message.edit_reply_markup(

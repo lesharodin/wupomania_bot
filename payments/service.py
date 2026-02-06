@@ -87,7 +87,7 @@ def create_payment(
             "type": "redirect",
             "return_url": "https://whoopclub.ru/payment/success"
         },
-        "description": description or "Оплата",
+        "description": description if description else "Вупомания",
         "metadata": {
             "payment_id": str(payment_id)
         }

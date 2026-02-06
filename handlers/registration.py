@@ -66,7 +66,7 @@ async def reg_accept(callback: CallbackQuery, state: FSMContext):
         rules_accepted=True,
     )
 
-    await callback.message.answer("✍️ Введите ФИО полностью:")
+    await callback.message.answer("✍️ Введите ФИО полностью одним сообщением:")
     await state.set_state(Registration.enter_fio)
     await callback.answer()
 
@@ -132,7 +132,7 @@ async def enter_fio(message: Message, state: FSMContext):
         await message.answer(
             "✅ <b>Регистрация завершена!</b>\n\n"
             "🚀 Продажи билетов уже открыты!\n"
-            "Ты можешь записаться на гонку прямо сейчас 👇",
+            "Вы можешете записаться на гонку прямо сейчас 👇",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(

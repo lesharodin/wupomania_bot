@@ -20,7 +20,7 @@ async def start(message: Message, state: FSMContext):
             raise Exception()
     except:
         await message.answer(
-            "❌ Для участия в гонке нужно быть подписанным на канал.\n\n"
+            "❌ Для участия в гонке нужно быть подписанным на канал @whoopmania.\n\n"
             "После подписки нажми /start ещё раз."
         )
         return

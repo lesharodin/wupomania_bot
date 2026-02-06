@@ -45,12 +45,14 @@ def build_prefilled_form_url(base_url: str, fio: str) -> str:
 # =========================
 @router.callback_query(F.data == "buy_ticket")
 async def buy_ticket(callback: CallbackQuery):
-    user_id = callback.from_user.id
+    user = callback.from_user
+    user_id = user.id
     reserve_until = datetime.now() + timedelta(seconds=RESERVE_TIMEOUT_SECONDS)
 
     with get_connection() as conn:
         cursor = conn.cursor()
 
+        # 1️⃣ активная гонка
         cursor.execute("""
             SELECT id FROM races
             WHERE status = 'sales_open'
@@ -63,6 +65,7 @@ async def buy_ticket(callback: CallbackQuery):
             return
         race_id = race[0]
 
+        # 2️⃣ статус пользователя
         cursor.execute("""
             SELECT status FROM users WHERE telegram_id = ?
         """, (user_id,))
@@ -70,6 +73,7 @@ async def buy_ticket(callback: CallbackQuery):
             await callback.answer("Недоступно", show_alert=True)
             return
 
+        # 3️⃣ свободный слот
         cursor.execute("""
             SELECT id FROM race_slots
             WHERE race_id = ? AND status = 'free'
@@ -90,15 +94,11 @@ async def buy_ticket(callback: CallbackQuery):
                 "Ты добавлен в лист ожидания.",
                 parse_mode="HTML"
             )
-            await callback.bot.send_message(
-                ADMIN_CHAT_ID,
-                f"📥 В waitlist: <code>{user_id}</code>",
-                parse_mode="HTML"
-            )
             return
 
         slot_id = slot[0]
 
+        # 4️⃣ резервируем слот
         cursor.execute("""
             UPDATE race_slots
             SET status='reserved', user_id=?, reserved_until=?
@@ -109,14 +109,32 @@ async def buy_ticket(callback: CallbackQuery):
             UPDATE users SET status='reserved'
             WHERE telegram_id=?
         """, (user_id,))
-
         conn.commit()
+
+    # ===== СОЗДАЁМ ПЛАТЁЖ СРАЗУ =====
+
+    username = f"@{user.username}" if user.username else f"id{user.id}"
+
+    payment_url = create_payment(
+        user_id=user_id,
+        amount=1,  # ← потом вынесешь в конфиг
+        target_type="race_slot",
+        target_id=slot_id,
+        chat_id=callback.message.chat.id,
+        message_id=callback.message.message_id,
+        description=(
+            "Вупомания | "
+            f"{username} | "
+            f"tgid {user.id} | "
+            f"slot {slot_id}"
+        )
+    )
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
-                text="💳 Перейти к оплате",
-                callback_data=f"pay_race:{slot_id}"
+                text="💳 Оплатить через СБП",
+                url=payment_url
             )]
         ]
     )
@@ -128,6 +146,7 @@ async def buy_ticket(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
+    # сохраняем message_id для watcher
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -136,40 +155,6 @@ async def buy_ticket(callback: CallbackQuery):
             WHERE id=?
         """, (callback.message.chat.id, msg.message_id, slot_id))
         conn.commit()
-
-    await callback.answer()
-
-
-# =========================
-# REAL PAYMENT (YooKassa)
-# =========================
-@router.callback_query(F.data.startswith("pay_race:"))
-async def pay_race(callback: CallbackQuery):
-    slot_id = int(callback.data.split(":")[1])
-    user_id = callback.from_user.id
-    user = callback.from_user
-    username = f"@{user.username}" if user.username else f"id{user.id}"
-
-    payment_url = create_payment(
-        user_id=user_id,
-        amount=1,
-        target_type="race_slot",
-        target_id=slot_id,
-        chat_id=callback.message.chat.id,
-        message_id=callback.message.message_id,
-        description=f"{username} Участие в гонке «Вупомания | tgid {user_id} | slot {slot_id}»"
-    )
-
-    await callback.message.edit_reply_markup(
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(
-                    text="💳 Оплатить через СБП",
-                    url=payment_url
-                )]
-            ]
-        )
-    )
 
     await callback.answer()
 

@@ -19,11 +19,8 @@ router = Router()
 # FSM
 # =========================
 class Registration(StatesGroup):
-    accept_pd = State()
-    accept_rules = State()
+    accept_disclaimer = State()
     enter_fio = State()
-    select_video = State()
-    select_drone = State()
 
 
 # =========================
@@ -31,70 +28,58 @@ class Registration(StatesGroup):
 # =========================
 @router.callback_query(F.data == "start_reg")
 async def start_registration(callback: CallbackQuery, state: FSMContext):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, согласен", callback_data="reg_pd_yes")],
-        [InlineKeyboardButton(text="❌ Не согласен", callback_data="reg_pd_no")],
-    ])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="✅ Согласен, продолжить",
+                callback_data="reg_accept"
+            )],
+            [InlineKeyboardButton(
+                text="❌ Не согласен",
+                callback_data="reg_decline"
+            )],
+        ]
+    )
 
     await callback.message.answer(
-        "📄 <b>Согласие на обработку персональных данных</b>\n\n"
-        "Для участия в гонке необходимо дать согласие "
-        "на обработку персональных данных.\n\n"
-        "Нажимая «Да, согласен», вы подтверждаете своё согласие.",
+        "⚠️ <b>Важная информация</b>\n\n"
+        "Для участия в гонке необходимо:\n"
+        "• согласие на обработку персональных данных\n"
+        "• ознакомление с регламентом гонки\n\n"
+        f"📘 Регламент:\n{RULES_URL}\n\n"
+        "Нажимая «Согласен, продолжить», вы подтверждаете оба пункта.",
         reply_markup=kb,
         parse_mode="HTML",
     )
 
-    await state.set_state(Registration.accept_pd)
+    await state.set_state(Registration.accept_disclaimer)
     await callback.answer()
 
 
 # =========================
-# PD ACCEPT / DECLINE
+# ACCEPT / DECLINE
 # =========================
-@router.callback_query(F.data == "reg_pd_yes", Registration.accept_pd)
-async def reg_pd_yes(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(pd_accepted=True)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="📘 Ознакомился с регламентом",
-            callback_data="reg_rules_yes",
-        )]
-    ])
-
-    await callback.message.answer(
-        "📘 <b>Регламент гонки</b>\n\n"
-        f"Ознакомьтесь с регламентом:\n{RULES_URL}\n\n"
-        "После прочтения нажмите кнопку ниже.",
-        reply_markup=kb,
-        parse_mode="HTML",
+@router.callback_query(F.data == "reg_accept", Registration.accept_disclaimer)
+async def reg_accept(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(
+        pd_accepted=True,
+        rules_accepted=True,
     )
-
-    await state.set_state(Registration.accept_rules)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "reg_pd_no", Registration.accept_pd)
-async def reg_pd_no(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-
-    await callback.message.answer(
-        "❌ Без согласия на обработку персональных данных\n"
-        "регистрация и участие в гонке невозможны."
-    )
-    await callback.answer()
-
-
-# =========================
-# RULES ACCEPT
-# =========================
-@router.callback_query(F.data == "reg_rules_yes", Registration.accept_rules)
-async def reg_rules_yes(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(rules_accepted=True)
 
     await callback.message.answer("✍️ Введите ФИО полностью:")
     await state.set_state(Registration.enter_fio)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "reg_decline", Registration.accept_disclaimer)
+async def reg_decline(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+
+    await callback.message.answer(
+        "❌ Без согласия на условия\n"
+        "регистрация и участие в гонке невозможны.\n"
+        "если вы передумали, нажмите /start"
+    )
     await callback.answer()
 
 
@@ -103,47 +88,7 @@ async def reg_rules_yes(callback: CallbackQuery, state: FSMContext):
 # =========================
 @router.message(Registration.enter_fio)
 async def enter_fio(message: Message, state: FSMContext):
-    await state.update_data(fio=message.text.strip())
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Analog", callback_data="reg_video_analog"),
-            InlineKeyboardButton(text="HDZero", callback_data="reg_video_hdzero"),
-        ]
-    ])
-
-    await message.answer("🎥 Выберите видеосистему:", reply_markup=kb)
-    await state.set_state(Registration.select_video)
-
-
-# =========================
-# VIDEO SYSTEM
-# =========================
-@router.callback_query(F.data.startswith("reg_video_"), Registration.select_video)
-async def select_video(callback: CallbackQuery, state: FSMContext):
-    video_system = callback.data.replace("reg_video_", "")
-    await state.update_data(video_system=video_system)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="65 мм", callback_data="reg_drone_65"),
-            InlineKeyboardButton(text="75 мм", callback_data="reg_drone_75"),
-        ]
-    ])
-
-    await callback.message.answer("🚁 Выберите размер дрона:", reply_markup=kb)
-    await state.set_state(Registration.select_drone)
-    await callback.answer()
-
-
-# =========================
-# DRONE SIZE
-# =========================
-@router.callback_query(F.data.startswith("reg_drone_"), Registration.select_drone)
-async def select_drone(callback: CallbackQuery, state: FSMContext):
-    drone_size = callback.data.replace("reg_drone_", "")
-    await state.update_data(drone_size=drone_size)
-
+    fio = message.text.strip()
     data = await state.get_data()
     await state.clear()
 
@@ -155,20 +100,16 @@ async def select_drone(callback: CallbackQuery, state: FSMContext):
             INSERT INTO users (
                 telegram_id,
                 fio,
-                video_system,
-                drone_size,
                 pd_accepted,
                 rules_accepted,
                 status,
                 created_at
             )
-            VALUES (?, ?, ?, ?, 1, 1, 'registered', ?)
+            VALUES (?, ?, 1, 1, 'registered', ?)
             """,
             (
-                callback.from_user.id,
-                data["fio"],
-                data["video_system"],
-                drone_size,
+                message.from_user.id,
+                fio,
                 datetime.now().isoformat(),
             ),
         )
@@ -188,7 +129,7 @@ async def select_drone(callback: CallbackQuery, state: FSMContext):
 
     # --- user message ---
     if race:
-        await callback.message.answer(
+        await message.answer(
             "✅ <b>Регистрация завершена!</b>\n\n"
             "🚀 Продажи билетов уже открыты!\n"
             "Ты можешь записаться на гонку прямо сейчас 👇",
@@ -203,28 +144,23 @@ async def select_drone(callback: CallbackQuery, state: FSMContext):
             parse_mode="HTML",
         )
     else:
-        await callback.message.answer(
+        await message.answer(
             "✅ <b>Регистрация завершена!</b>\n\n"
             "⏳ Продажи билетов откроются позже, мы тебя уведомим.",
             parse_mode="HTML",
         )
 
-
     # --- admin log ---
-    user = callback.from_user
+    user = message.from_user
     user_display = f"@{user.username}" if user.username else user.full_name
 
-    await callback.bot.send_message(
+    await message.bot.send_message(
         ADMIN_CHAT_ID,
         (
             "🆕 <b>Новая регистрация</b>\n"
-            f"👤 {data['fio']}\n"
-            f"🎥 Видео: {data['video_system']}\n"
-            f"🚁 Дрон: {drone_size}\n"
+            f"👤 {fio}\n"
             f"🔗 Telegram: {user_display}\n"
             f"🆔 ID: <code>{user.id}</code>"
         ),
         parse_mode="HTML",
     )
-
-    await callback.answer()

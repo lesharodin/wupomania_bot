@@ -1,7 +1,7 @@
 from aiogram import Router, F
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from datetime import datetime
-
+from handlers.waitlist import try_assign_from_waitlist
 from database.db import get_connection
 from config import ADMINS, ADMIN_CHAT_ID
 
@@ -241,9 +241,8 @@ async def list_users(message: Message):
         block = (
             f"👤 <b>{fio}</b>\n"
             f"🔗 {profile_link}\n"
+            f" TGID {tg_id}\n"
             f"📌 Статус: <b>{status_label}</b>\n"
-            f"🎥 Видео: {video}\n"
-            f"🚁 Дрон: {drone}\n"
             "────────────\n"
         )
 
@@ -258,3 +257,105 @@ async def list_users(message: Message):
 
     for msg in messages:
         await message.answer(msg, parse_mode="HTML")
+
+# =========================
+# CONFIRM CANCEL (ADMIN)
+# =========================
+@router.callback_query(F.data.startswith("cancel_confirm_admin:"))
+async def cancel_confirm(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    slot_id = int(callback.data.split(":")[1])
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # берём user_id и race_id
+        cursor.execute("""
+            SELECT user_id, race_id
+            FROM race_slots
+            WHERE id = ?
+        """, (slot_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            await callback.answer("Слот не найден", show_alert=True)
+            return
+
+        user_id, race_id = row
+
+        # освобождаем слот
+        cursor.execute("""
+            UPDATE race_slots
+            SET status = 'free',
+                user_id = NULL,
+                reserved_until = NULL,
+                chat_id = NULL,
+                message_id = NULL
+            WHERE id = ?
+        """, (slot_id,))
+
+        # обновляем пользователя
+        cursor.execute("""
+            UPDATE users
+            SET status = 'cancelled',
+                refund_pending = 1
+            WHERE telegram_id = ?
+        """, (user_id,))
+
+        conn.commit()
+
+    # уведомляем пользователя
+    await callback.bot.send_message(
+        user_id,
+        "❌ <b>Ваша запись на гонку отменена</b>\n\n"
+        "💰 Возврат средств будет выполнен вручную администратором.",
+        parse_mode="HTML"
+    )
+
+    # обновляем сообщение админа
+    await callback.message.edit_text(
+        f"✅ <b>Отмена подтверждена</b>\n🆔 Slot ID: {slot_id}",
+        parse_mode="HTML"
+    )
+
+    await callback.answer("Отмена подтверждена")
+
+    # 🔥 ВАЖНО: пускаем waitlist
+    await try_assign_from_waitlist(callback.bot, race_id)
+
+
+
+# =========================
+# CANCEL ABORT (ADMIN)
+# =========================
+@router.callback_query(F.data.startswith("cancel_abort_admin:"))
+async def cancel_abort_admin(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    slot_id = int(callback.data.split(":")[1])
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id FROM race_slots WHERE id = ?
+        """, (slot_id,))
+        row = cursor.fetchone()
+
+    if row:
+        await callback.bot.send_message(
+            row[0],
+            "❌ <b>Отмена участия отклонена администратором</b>",
+            parse_mode="HTML"
+        )
+
+    await callback.message.edit_text(
+        f"🚫 <b>Отмена отклонена</b>\n🆔 Slot ID: {slot_id}",
+        parse_mode="HTML"
+    )
+
+    await callback.answer("Отмена отклонена")

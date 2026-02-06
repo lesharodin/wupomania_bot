@@ -29,4 +29,5 @@ ADMINS = [
 ]
 
 ENV = os.getenv("ENV", "DEV")
-
+YOOKASSA_SHOP_ID = os.getenv ("YOOKASSA_SHOP_ID")
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")

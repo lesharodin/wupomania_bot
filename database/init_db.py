@@ -15,7 +15,10 @@ with get_connection() as conn:
         rules_accepted INTEGER,
         status TEXT,
         created_at TEXT,
-        form_confirmed INTEGER DEFAULT 0
+        form_confirmed INTEGER DEFAULT 0,
+        cancel_requested_at TEXT,
+        cancel_approved_at TEXT,
+        refund_pending INTEGER DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS races (
@@ -33,7 +36,9 @@ with get_connection() as conn:
         race_id INTEGER,
         status TEXT,
         user_id INTEGER,
-        reserved_until TEXT
+        reserved_until TEXT,
+        chat_id INTEGER,
+        message_id INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS waitlist (

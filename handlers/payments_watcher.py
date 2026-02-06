@@ -2,6 +2,7 @@ import asyncio
 from database.db import get_club_connection, get_connection
 from handlers.sales import show_pass_form
 from logging_config import logger
+from config import ADMIN_CHAT_ID
 
 
 async def payments_watcher(bot):

@@ -3,7 +3,7 @@ import os
 RULES_URL = "https://docs.google.com/document/d/1bYUzP41EjBW1N8yuA4X_fpXMh9U6VpDALmYsnkFRZZY"
 
 # Тайминги
-RESERVE_TIMEOUT_SECONDS = 10 * 60
+RESERVE_TIMEOUT_SECONDS = 600
 
 
 from dotenv import load_dotenv

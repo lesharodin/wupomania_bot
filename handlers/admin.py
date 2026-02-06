@@ -359,3 +359,90 @@ async def cancel_abort_admin(callback: CallbackQuery):
     )
 
     await callback.answer("Отмена отклонена")
+# =========================
+# ADD SLOTS TO ACTIVE RACE
+# =========================
+@router.message(F.text.startswith("/add_slots"))
+async def add_slots(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Формат:\n/add_slots COUNT")
+        return
+
+    try:
+        count = int(parts[1])
+        if count <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ COUNT должен быть положительным числом")
+        return
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # 1️⃣ активная гонка
+        cursor.execute("""
+            SELECT id
+            FROM races
+            WHERE status = 'sales_open'
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+
+        if not row:
+            await message.answer("❌ Нет активной гонки (sales_open)")
+            return
+
+        race_id = row[0]
+
+        # 2️⃣ добавляем слоты
+        for _ in range(count):
+            cursor.execute("""
+                INSERT INTO race_slots (race_id, status)
+                VALUES (?, 'free')
+            """, (race_id,))
+
+        conn.commit()
+
+    await message.answer(
+        f"➕ <b>Добавлены слоты</b>\n"
+        f"🎟 Количество: <b>{count}</b>\n"
+        f"🏁 Race ID: <code>{race_id}</code>",
+        parse_mode="HTML"
+    )
+
+    await message.bot.send_message(
+        ADMIN_CHAT_ID,
+        (
+            "➕ <b>Админ добавил слоты</b>\n"
+            f"🎟 Количество: <b>{count}</b>\n"
+            f"🏁 Race ID: <code>{race_id}</code>"
+        ),
+        parse_mode="HTML"
+    )
+
+    # 3️⃣ отдаём слоты waitlist’у + логируем КАЖДОГО
+    for _ in range(count):
+        result = await try_assign_from_waitlist(message.bot, race_id)
+
+        if not result:
+            break  # waitlist закончился
+
+        user_id, fio, slot_id = result
+
+        await message.bot.send_message(
+            ADMIN_CHAT_ID,
+            (
+                "⏭️ <b>Слот отдан из waitlist (добавление)</b>\n"
+                f"👤 {fio}\n"
+                f"🆔 User ID: <code>{user_id}</code>\n"
+                f"🎟 Slot ID: <code>{slot_id}</code>\n"
+                f"🏁 Race ID: <code>{race_id}</code>"
+            ),
+            parse_mode="HTML"
+        )
+

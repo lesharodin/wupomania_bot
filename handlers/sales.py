@@ -196,9 +196,21 @@ async def show_pass_form(bot, user_id: int, slot_id: int):
 async def form_done(callback: CallbackQuery):
     user_id = callback.from_user.id
     slot_id = int(callback.data.split(":")[1])
+    user = callback.from_user
+    username = f"@{user.username}" if user.username else f"id{user.id}"
 
     with get_connection() as conn:
         cursor = conn.cursor()
+
+        # получаем дату гонки
+        cursor.execute("""
+            SELECT r.date
+            FROM race_slots rs
+            JOIN races r ON r.id = rs.race_id
+            WHERE rs.id = ?
+        """, (slot_id,))
+        race_date = cursor.fetchone()[0]
+
         cursor.execute("""
             UPDATE users
             SET status='form_confirmed', form_confirmed=1
@@ -206,15 +218,96 @@ async def form_done(callback: CallbackQuery):
         """, (user_id,))
         conn.commit()
 
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="❌ Запросить отмену участия",
+                callback_data=f"cancel_request:{slot_id}"
+            )]
+        ]
+    )
+
     await callback.message.answer(
         "🎉 <b>Ты успешно записан на гонку!</b>\n\n"
-        "Следи за новостями в канале @whoopmania",
-        parse_mode="HTML"
+        "❗ Отменить участие можно <b>не позднее чем за 3 суток</b> до гонки.\n"
+        "Запрос на отмену подтверждается администратором.",
+        parse_mode="HTML",
+        reply_markup=kb
     )
 
     await callback.bot.send_message(
         ADMIN_CHAT_ID,
-        f"📄 Форма подтверждена\n🆔 Slot {slot_id}",
+        f"📄 {username} \n <b>Форма подтверждена</b>\n🆔 Slot ID: {slot_id}",
+        parse_mode="HTML"
+    )
+
+    await callback.answer()
+@router.callback_query(F.data.startswith("cancel_request:"))
+async def cancel_request(callback: CallbackQuery):
+    slot_id = int(callback.data.split(":")[1])
+    user = callback.from_user
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT r.date
+            FROM race_slots rs
+            JOIN races r ON r.id = rs.race_id
+            WHERE rs.id = ? AND rs.user_id = ?
+        """, (slot_id, user.id))
+        row = cursor.fetchone()
+
+    if not row:
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
+
+    race_date = datetime.fromisoformat(row[0])
+
+    if race_date - datetime.now() < timedelta(days=3):
+        await callback.answer(
+            "❌ Отмена возможна только не позднее чем за 3 суток до гонки",
+            show_alert=True
+        )
+        return
+
+    # сообщение пользователю
+    await callback.message.answer(
+        "📨 <b>Запрос на отмену отправлен</b>\n\n"
+        "Администратор рассмотрит его в ближайшее время.",
+        parse_mode="HTML"
+    )
+
+    # сообщение админам
+    user_display = (
+        f"@{user.username} (<code>{user.id}</code>)"
+        if user.username
+        else f"<a href='tg://user?id={user.id}'>{user.full_name}</a> (<code>{user.id}</code>)"
+    )
+
+    admin_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить отмену",
+                    callback_data=f"cancel_confirm_admin:{slot_id}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"cancel_abort_admin:{slot_id}"
+                )
+            ]
+        ]
+    )
+
+    await callback.bot.send_message(
+        ADMIN_CHAT_ID,
+        (
+            "❌ <b>Запрос отмены участия</b>\n\n"
+            f"👤 {user_display}\n"
+            f"🆔 Slot ID: {slot_id}"
+        ),
+        reply_markup=admin_kb,
         parse_mode="HTML"
     )
 

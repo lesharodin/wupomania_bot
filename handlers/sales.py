@@ -249,7 +249,7 @@ async def form_done(callback: CallbackQuery):
 
     await callback.bot.send_message(
         ADMIN_CHAT_ID,
-        f"📄 {username} \n <b>Форма подтверждена</b>\n🆔 Slot ID: {slot_id}",
+        f"📄 {username} Записался на гонку\n <b>✅Форма подтверждена</b>\n 🆔 Slot ID: {slot_id}",
         parse_mode="HTML"
     )
 

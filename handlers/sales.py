@@ -128,7 +128,7 @@ async def buy_ticket(callback: CallbackQuery):
 
     payment_url = create_payment(
         user_id=user_id,
-        amount=1,  # ← потом вынесешь в конфиг
+        amount=2000,  # ← потом вынесешь в конфиг
         target_type="race_slot",
         target_id=slot_id,
         chat_id=callback.message.chat.id,

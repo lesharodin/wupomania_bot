@@ -71,7 +71,7 @@ async def try_assign_from_waitlist(bot, race_id: int):
     # ===== дальше БЕЗ БД =====
     payment_url = create_payment(
         user_id=user_id,
-        amount=1,
+        amount=2000,
         target_type="race_slot",
         target_id=slot_id,
         chat_id=None,

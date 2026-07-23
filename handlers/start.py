@@ -25,64 +25,70 @@ async def start(message: Message, state: FSMContext):
         )
         return
 
-    # 2️⃣ проверяем пользователя
+    # 2️⃣ проверяем профиль пользователя
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT status FROM users WHERE telegram_id = ?",
+            "SELECT telegram_id FROM users WHERE telegram_id = ?",
             (user_id,)
         )
         row = cursor.fetchone()
 
-    # 3️⃣ если уже зарегистрирован — обычный роутинг
+    # 3️⃣ если профиль уже есть — смотрим текущую гонку
     if row:
-        status = row[0]
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id
+                FROM races
+                WHERE status = 'sales_open'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """)
+            race = cursor.fetchone()
 
-        if status == "registered":
-            with get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT id
-                    FROM races
-                    WHERE status = 'sales_open'
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                """)
-                race = cursor.fetchone()
-
+            entry = None
             if race:
-                await message.answer(
-                    "🚀 <b>Продажи билетов уже открыты!</b>\n\n"
-                    "👇 Нажми кнопку ниже, чтобы записаться:",
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [InlineKeyboardButton(
-                                text="🎟 Записаться на гонку",
-                                callback_data="buy_ticket"
-                            )]
-                        ]
-                    ),
-                    parse_mode="HTML"
-                )
-            else:
-                await message.answer("⏳ Ты зарегистрирован. Продажи ещё не начались.")
+                cursor.execute("""
+                    SELECT status
+                    FROM race_entries
+                    WHERE race_id = ? AND telegram_id = ?
+                """, (race[0], user_id))
+                entry = cursor.fetchone()
+
+        if not race:
+            await message.answer("⏳ Ты зарегистрирован. Продажи ещё не начались.")
             return
 
-        if status == "reserved":
-            await message.answer("⏳ У тебя есть активный резерв.")
-            return
+        if entry:
+            status = entry[0]
+            if status == "reserved":
+                await message.answer("⏳ У тебя есть активный резерв на эту гонку.")
+                return
+            if status == "paid":
+                await message.answer("💳 Оплата получена. Заполни форму.")
+                return
+            if status == "form_confirmed":
+                await message.answer("🏁 Ты полностью записан на эту гонку.")
+                return
+            if status == "waitlist":
+                await message.answer("📥 Ты в листе ожидания этой гонки.")
+                return
 
-        if status == "paid":
-            await message.answer("💳 Оплата получена. Заполни форму.")
-            return
-
-        if status == "form_confirmed":
-            await message.answer("🏁 Ты полностью зарегистрирован.")
-            return
-
-        if status == "waitlist":
-            await message.answer("📥 Ты в листе ожидания.")
-            return
+        await message.answer(
+            "🚀 <b>Продажи билетов уже открыты!</b>\n\n"
+            "👇 Нажми кнопку ниже, чтобы записаться:",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="🎟 Записаться на гонку",
+                        callback_data="buy_ticket"
+                    )]
+                ]
+            ),
+            parse_mode="HTML"
+        )
+        return
 
     # 4️⃣ НОВЫЙ пользователь → дисклеймер
     kb = InlineKeyboardMarkup(

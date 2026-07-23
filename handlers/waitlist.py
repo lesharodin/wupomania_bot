@@ -1,10 +1,15 @@
 # services/waitlist.py
 
+import asyncio
 from datetime import datetime, timedelta
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from database.db import get_connection
-from config import ADMIN_CHAT_ID, RESERVE_TIMEOUT_SECONDS
+from config import (
+    ADMIN_CHAT_ID,
+    PARTICIPATION_PRICE_RUB,
+    RESERVE_TIMEOUT_SECONDS,
+)
 from payments.service import create_payment
 
 
@@ -16,6 +21,17 @@ async def try_assign_from_waitlist(bot, race_id: int):
 
     with get_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+
+        cursor.execute("""
+            SELECT status
+            FROM races
+            WHERE id = ?
+        """, (race_id,))
+        race = cursor.fetchone()
+        if not race or race[0] != "sales_open":
+            conn.rollback()
+            return None
 
         # 1️⃣ свободный слот
         cursor.execute("""
@@ -33,18 +49,20 @@ async def try_assign_from_waitlist(bot, race_id: int):
 
         slot_id = slot[0]
 
-        # 2️⃣ первый пользователь в waitlist
+        # 2️⃣ первый пользователь в waitlist этой гонки
         cursor.execute("""
-            SELECT telegram_id, fio
-            FROM users
-            WHERE status = 'waitlist'
-            ORDER BY created_at
+            SELECT re.telegram_id, u.fio
+            FROM race_entries re
+            JOIN users u ON u.telegram_id = re.telegram_id
+            WHERE re.race_id = ?
+              AND re.status = 'waitlist'
+            ORDER BY re.created_at
             LIMIT 1
-        """)
+        """, (race_id,))
         row = cursor.fetchone()
 
         if not row:
-            return
+            return None
 
         user_id, fio = row
         reserve_until = (
@@ -58,31 +76,84 @@ async def try_assign_from_waitlist(bot, race_id: int):
                 user_id = ?,
                 reserved_until = ?
             WHERE id = ?
+              AND status = 'free'
         """, (user_id, reserve_until, slot_id))
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
 
         cursor.execute("""
-            UPDATE users
-            SET status = 'reserved'
-            WHERE telegram_id = ?
-        """, (user_id,))
+            UPDATE race_entries
+            SET status = 'reserved',
+                slot_id = ?,
+                updated_at = ?
+            WHERE race_id = ?
+              AND telegram_id = ?
+              AND status = 'waitlist'
+        """, (slot_id, datetime.now().isoformat(), race_id, user_id))
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
 
         conn.commit()
 
     # ===== дальше БЕЗ БД =====
-    payment_url = create_payment(
-        user_id=user_id,
-        amount=2000,
-        target_type="race_slot",
-        target_id=slot_id,
-        chat_id=None,
-        message_id=None,
-        description=(
-            "Вупомания | "
-            f"{fio} | "
-            f"tgid {user_id} | "
-            f"slot {slot_id}"
+    try:
+        payment_url = await asyncio.to_thread(
+            create_payment,
+            user_id=user_id,
+            amount=PARTICIPATION_PRICE_RUB,
+            target_type="race_slot",
+            target_id=slot_id,
+            chat_id=None,
+            message_id=None,
+            description=(
+                "Вупомания | "
+                f"{fio} | "
+                f"tgid {user_id} | "
+                f"slot {slot_id}"
+            )
         )
-    )
+    except Exception:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE race_slots
+                SET status = 'free',
+                    user_id = NULL,
+                    reserved_until = NULL
+                WHERE id = ?
+                  AND status = 'reserved'
+                  AND user_id = ?
+            """, (slot_id, user_id))
+            cursor.execute("""
+                UPDATE race_entries
+                SET status = 'waitlist',
+                    slot_id = NULL,
+                    updated_at = ?
+                WHERE race_id = ?
+                  AND telegram_id = ?
+                  AND slot_id = ?
+                  AND status = 'reserved'
+            """, (
+                datetime.now().isoformat(),
+                race_id,
+                user_id,
+                slot_id,
+            ))
+            conn.commit()
+
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            (
+                "⚠️ <b>Не удалось создать платеж для waitlist</b>\n"
+                f"👤 {fio}\n"
+                f"🆔 User ID: <code>{user_id}</code>\n"
+                f"🎟 Slot ID: <code>{slot_id}</code>"
+            ),
+            parse_mode="HTML"
+        )
+        return None
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -113,3 +184,5 @@ async def try_assign_from_waitlist(bot, race_id: int):
         ),
         parse_mode="HTML"
     )
+
+    return user_id, fio, slot_id

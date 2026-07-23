@@ -41,6 +41,20 @@ with get_connection() as conn:
         message_id INTEGER
     );
 
+    CREATE TABLE IF NOT EXISTS race_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        race_id INTEGER NOT NULL,
+        telegram_id INTEGER NOT NULL,
+        slot_id INTEGER,
+        status TEXT NOT NULL,
+        created_at TEXT,
+        updated_at TEXT,
+        UNIQUE(race_id, telegram_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_race_entries_race_status
+    ON race_entries (race_id, status, created_at);
+
     CREATE TABLE IF NOT EXISTS waitlist (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         race_id INTEGER,

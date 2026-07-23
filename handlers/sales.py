@@ -1,14 +1,28 @@
+import asyncio
+
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from payments.service import create_payment
 from database.db import get_connection
-from config import ADMIN_CHAT_ID, RESERVE_TIMEOUT_SECONDS
+from handlers.waitlist import try_assign_from_waitlist
+from config import (
+    ADMIN_CHAT_ID,
+    PARTICIPATION_PRICE_RUB,
+    RESERVE_TIMEOUT_SECONDS,
+)
 
 router = Router()
 
 PASS_FORM_URL = "https://forms.yandex.ru/u/6984f9c3068ff03215f42371/"
+
+ENTRY_MESSAGES = {
+    "reserved": "⏳ У тебя уже есть активный резерв на эту гонку.",
+    "paid": "💳 Оплата уже получена. Заполни форму.",
+    "form_confirmed": "🏁 Ты уже записан на эту гонку.",
+    "waitlist": "📥 Ты уже в листе ожидания этой гонки.",
+}
 
 
 # =========================
@@ -65,12 +79,24 @@ async def buy_ticket(callback: CallbackQuery):
             return
         race_id = race[0]
 
-        # 2️⃣ статус пользователя
+        # 2️⃣ профиль пользователя
         cursor.execute("""
-            SELECT status FROM users WHERE telegram_id = ?
+            SELECT fio FROM users WHERE telegram_id = ?
         """, (user_id,))
-        if cursor.fetchone()[0] != "registered":
-            await callback.answer("Недоступно", show_alert=True)
+        user_row = cursor.fetchone()
+        if not user_row:
+            await callback.answer("Сначала нажми /start", show_alert=True)
+            return
+        fio = user_row[0]
+
+        cursor.execute("""
+            SELECT status
+            FROM race_entries
+            WHERE race_id = ? AND telegram_id = ?
+        """, (race_id, user_id))
+        entry = cursor.fetchone()
+        if entry and entry[0] in ENTRY_MESSAGES:
+            await callback.answer(ENTRY_MESSAGES[entry[0]], show_alert=True)
             return
 
         # 3️⃣ свободный слот
@@ -83,10 +109,23 @@ async def buy_ticket(callback: CallbackQuery):
 
         # WAITLIST
         if not slot:
+            now = datetime.now().isoformat()
             cursor.execute("""
-                UPDATE users SET status = 'waitlist'
-                WHERE telegram_id = ?
-            """, (user_id,))
+                INSERT INTO race_entries (
+                    race_id,
+                    telegram_id,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, 'waitlist', ?, ?)
+                ON CONFLICT(race_id, telegram_id)
+                DO UPDATE SET
+                    status = 'waitlist',
+                    slot_id = NULL,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at
+            """, (race_id, user_id, now, now))
             conn.commit()
 
             await callback.message.answer(
@@ -108,38 +147,90 @@ async def buy_ticket(callback: CallbackQuery):
             return
 
         slot_id = slot[0]
+        now = datetime.now().isoformat()
 
         # 4️⃣ резервируем слот
         cursor.execute("""
             UPDATE race_slots
             SET status='reserved', user_id=?, reserved_until=?
-            WHERE id=?
+            WHERE id=? AND status='free'
         """, (user_id, reserve_until.isoformat(), slot_id))
+        if cursor.rowcount != 1:
+            await callback.answer(
+                "Место уже занято, попробуй еще раз",
+                show_alert=True,
+            )
+            return
 
         cursor.execute("""
-            UPDATE users SET status='reserved'
-            WHERE telegram_id=?
-        """, (user_id,))
+            INSERT INTO race_entries (
+                race_id,
+                telegram_id,
+                slot_id,
+                status,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, 'reserved', ?, ?)
+            ON CONFLICT(race_id, telegram_id)
+            DO UPDATE SET
+                slot_id = excluded.slot_id,
+                status = 'reserved',
+                updated_at = excluded.updated_at
+        """, (race_id, user_id, slot_id, now, now))
         conn.commit()
 
     # ===== СОЗДАЁМ ПЛАТЁЖ СРАЗУ =====
 
     username = f"@{user.username}" if user.username else f"id{user.id}"
 
-    payment_url = create_payment(
-        user_id=user_id,
-        amount=2000,  # ← потом вынесешь в конфиг
-        target_type="race_slot",
-        target_id=slot_id,
-        chat_id=callback.message.chat.id,
-        message_id=callback.message.message_id,
-        description=(
-            "Вупомания | "
-            f"{username} | "
-            f"tgid {user.id} | "
-            f"slot {slot_id}"
+    try:
+        payment_url = await asyncio.to_thread(
+            create_payment,
+            user_id=user_id,
+            amount=PARTICIPATION_PRICE_RUB,
+            target_type="race_slot",
+            target_id=slot_id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            description=(
+                "Вупомания | "
+                f"{username} | "
+                f"tgid {user.id} | "
+                f"slot {slot_id}"
+            )
         )
-    )
+    except Exception:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE race_slots
+                SET status = 'free',
+                    user_id = NULL,
+                    reserved_until = NULL,
+                    chat_id = NULL,
+                    message_id = NULL
+                WHERE id = ?
+                  AND status = 'reserved'
+                  AND user_id = ?
+            """, (slot_id, user_id))
+            cursor.execute("""
+                UPDATE race_entries
+                SET status = 'expired',
+                    updated_at = ?
+                WHERE race_id = ?
+                  AND telegram_id = ?
+                  AND slot_id = ?
+                  AND status = 'reserved'
+            """, (datetime.now().isoformat(), race_id, user_id, slot_id))
+            conn.commit()
+
+        await callback.message.answer(
+            "❌ Не удалось создать платеж. Место освобождено, попробуй снова."
+        )
+        await callback.answer()
+        await try_assign_from_waitlist(callback.bot, race_id)
+        return
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -173,7 +264,13 @@ async def buy_ticket(callback: CallbackQuery):
 # =========================
 # SHOW FORM (CALLED BY WATCHER AFTER PAYMENT)
 # =========================
-async def show_pass_form(bot, user_id: int, slot_id: int):
+async def show_pass_form(
+    bot,
+    user_id: int,
+    slot_id: int,
+    *,
+    payment_received: bool = True,
+):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -182,10 +279,15 @@ async def show_pass_form(bot, user_id: int, slot_id: int):
         fio = cursor.fetchone()[0]
 
     form_url = build_prefilled_form_url(PASS_FORM_URL, fio)
+    title = (
+        "✅ <b>Оплата получена</b>"
+        if payment_received
+        else "✅ <b>Участие подтверждено администратором</b>"
+    )
 
     await bot.send_message(
         user_id,
-        "✅ <b>Оплата получена</b>\n\n"
+        f"{title}\n\n"
         "Заполните форму для прохода на территорию:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
@@ -215,18 +317,29 @@ async def form_done(callback: CallbackQuery):
 
         # получаем дату гонки
         cursor.execute("""
-            SELECT r.date
+            SELECT r.date, rs.race_id
             FROM race_slots rs
             JOIN races r ON r.id = rs.race_id
             WHERE rs.id = ?
         """, (slot_id,))
-        race_date = cursor.fetchone()[0]
+        row = cursor.fetchone()
+        if not row:
+            await callback.answer("Запись не найдена", show_alert=True)
+            return
+        _, race_id = row
 
         cursor.execute("""
-            UPDATE users
-            SET status='form_confirmed', form_confirmed=1
-            WHERE telegram_id=?
-        """, (user_id,))
+            UPDATE race_entries
+            SET status = 'form_confirmed',
+                updated_at = ?
+            WHERE race_id = ?
+              AND telegram_id = ?
+              AND slot_id = ?
+              AND status = 'paid'
+        """, (datetime.now().isoformat(), race_id, user_id, slot_id))
+        if cursor.rowcount == 0:
+            await callback.answer("Оплаченная запись не найдена", show_alert=True)
+            return
         conn.commit()
 
     kb = InlineKeyboardMarkup(
@@ -263,11 +376,14 @@ async def cancel_request(callback: CallbackQuery):
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT r.date
+            SELECT r.date, re.status
             FROM race_slots rs
             JOIN races r ON r.id = rs.race_id
+            JOIN race_entries re ON re.slot_id = rs.id
             WHERE rs.id = ? AND rs.user_id = ?
-        """, (slot_id, user.id))
+              AND re.telegram_id = ?
+              AND re.status IN ('paid', 'form_confirmed')
+        """, (slot_id, user.id, user.id))
         row = cursor.fetchone()
 
     if not row:

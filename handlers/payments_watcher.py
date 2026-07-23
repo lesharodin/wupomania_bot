@@ -1,8 +1,13 @@
 import asyncio
+from datetime import datetime
 from database.db import get_club_connection, get_connection
 from handlers.sales import show_pass_form
 from logging_config import logger
 from config import ADMIN_CHAT_ID
+
+
+PAYMENT_PROCESSED = "processed"
+PAYMENT_REVIEW_REQUIRED = "review_required"
 
 
 async def payments_watcher(bot):
@@ -11,25 +16,29 @@ async def payments_watcher(bot):
     while True:
         await asyncio.sleep(5)
 
-        with get_club_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT
-                    id,
-                    user_id,
-                    target_id
-                FROM payments
-                WHERE status = 'succeeded'
-                  AND ui_status = 'shown'
-                  AND target_type = 'race_slot'
-                ORDER BY id
-                LIMIT 10
-            """)
-            payments = cursor.fetchall()
+        try:
+            with get_club_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT
+                        id,
+                        user_id,
+                        target_id
+                    FROM payments
+                    WHERE status = 'succeeded'
+                      AND ui_status = 'shown'
+                      AND target_type = 'race_slot'
+                    ORDER BY id
+                    LIMIT 10
+                """)
+                payments = cursor.fetchall()
+        except Exception:
+            logger.exception("[payments_watcher] cannot read payments")
+            continue
 
         for payment_id, user_id, slot_id in payments:
             try:
-                await handle_race_payment(
+                result = await handle_race_payment(
                     bot=bot,
                     payment_id=payment_id,
                     user_id=user_id,
@@ -39,16 +48,27 @@ async def payments_watcher(bot):
                 logger.exception(
                     f"[payments_watcher] error payment_id={payment_id}: {e}"
                 )
-            else:
-                # 🔒 помечаем как обработанный
+                continue
+
+            ui_status = (
+                "paid"
+                if result == PAYMENT_PROCESSED
+                else PAYMENT_REVIEW_REQUIRED
+            )
+            try:
                 with get_club_connection() as conn:
                     cursor = conn.cursor()
                     cursor.execute("""
                         UPDATE payments
-                        SET ui_status = 'paid'
+                        SET ui_status = ?
                         WHERE id = ?
-                    """, (payment_id,))
+                          AND ui_status = 'shown'
+                    """, (ui_status, payment_id))
                     conn.commit()
+            except Exception:
+                logger.exception(
+                    f"[payments_watcher] cannot update payment_id={payment_id}"
+                )
 
 
 async def handle_race_payment(
@@ -58,41 +78,112 @@ async def handle_race_payment(
     user_id: int,
     slot_id: int
 ):
+    review_reason = None
+    already_processed = False
+
     with get_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
 
         cursor.execute("""
-            SELECT status
-            FROM race_slots
-            WHERE id = ?
-        """, (slot_id,))
+            SELECT
+                rs.status,
+                rs.race_id,
+                rs.user_id,
+                re.status
+            FROM race_slots rs
+            LEFT JOIN race_entries re
+              ON re.race_id = rs.race_id
+             AND re.telegram_id = ?
+             AND re.slot_id = rs.id
+            WHERE rs.id = ?
+        """, (user_id, slot_id))
         row = cursor.fetchone()
 
         if not row:
-            raise RuntimeError(f"slot {slot_id} not found")
-
-        if row[0] != "reserved":
-            logger.warning(
-                f"[payments_watcher] skip payment {payment_id}, "
-                f"slot {slot_id} status={row[0]}"
+            review_reason = "слот не найден"
+        else:
+            slot_status, race_id, slot_user_id, entry_status = row
+            already_processed = (
+                slot_status == "paid"
+                and slot_user_id == user_id
+                and entry_status in ("paid", "form_confirmed")
             )
-            return
 
+            if already_processed:
+                conn.commit()
+            elif (
+                slot_status != "reserved"
+                or slot_user_id != user_id
+                or entry_status != "reserved"
+            ):
+                review_reason = (
+                    f"slot_status={slot_status}, "
+                    f"slot_user_id={slot_user_id}, "
+                    f"entry_status={entry_status}"
+                )
+            else:
+                cursor.execute("""
+                    UPDATE race_slots
+                    SET status = 'paid',
+                        reserved_until = NULL
+                    WHERE id = ?
+                      AND status = 'reserved'
+                      AND user_id = ?
+                """, (slot_id, user_id))
+                slot_updated = cursor.rowcount
 
-        # подтверждаем слот
-        cursor.execute("""
-            UPDATE race_slots
-            SET status = 'paid'
-            WHERE id = ?
-        """, (slot_id,))
+                cursor.execute("""
+                    UPDATE race_entries
+                    SET status = 'paid',
+                        updated_at = ?
+                    WHERE race_id = ?
+                      AND telegram_id = ?
+                      AND slot_id = ?
+                      AND status = 'reserved'
+                """, (
+                    datetime.now().isoformat(),
+                    race_id,
+                    user_id,
+                    slot_id,
+                ))
+                entry_updated = cursor.rowcount
 
-        cursor.execute("""
-            UPDATE users
-            SET status = 'paid'
-            WHERE telegram_id = ?
-        """, (user_id,))
+                if slot_updated != 1 or entry_updated != 1:
+                    conn.rollback()
+                    review_reason = (
+                        "не удалось атомарно подтвердить слот и участие"
+                    )
+                else:
+                    conn.commit()
 
-        conn.commit()
+        if review_reason:
+            conn.rollback()
+
+    if review_reason:
+        logger.error(
+            f"[payments_watcher] payment {payment_id} requires review: "
+            f"{review_reason}"
+        )
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            (
+                "⚠️ <b>Оплата требует ручной проверки</b>\n\n"
+                f"🧾 Payment ID: <code>{payment_id}</code>\n"
+                f"👤 User ID: <code>{user_id}</code>\n"
+                f"🎟 Slot ID: <code>{slot_id}</code>\n"
+                f"Причина: <code>{review_reason}</code>\n\n"
+                "Слот автоматически не подтвержден."
+            ),
+            parse_mode="HTML"
+        )
+        return PAYMENT_REVIEW_REQUIRED
+
+    if already_processed:
+        logger.info(
+            f"[payments_watcher] payment {payment_id} was already processed"
+        )
+        return PAYMENT_PROCESSED
 
     # 4️⃣ показываем форму
     await show_pass_form(bot, user_id, slot_id)
@@ -120,3 +211,4 @@ async def handle_race_payment(
         parse_mode="HTML"
     )
 
+    return PAYMENT_PROCESSED

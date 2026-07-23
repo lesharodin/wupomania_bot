@@ -192,7 +192,7 @@ class RaceFlowTests(unittest.IsolatedAsyncioTestCase):
         show_form.assert_not_awaited()
         bot.send_message.assert_not_awaited()
 
-    async def test_test_payment_does_not_notify_admin_chat(self):
+    async def test_test_payment_sends_labeled_admin_log(self):
         self.insert_reserved_slot(slot_user_id=100)
         with self.connection() as conn:
             conn.execute("""
@@ -221,8 +221,10 @@ class RaceFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, payments_watcher.PAYMENT_PROCESSED)
         show_form.assert_awaited_once_with(bot, 100, 10)
-        bot.send_message.assert_not_awaited()
-        bot.get_chat_member.assert_not_awaited()
+        bot.send_message.assert_awaited_once()
+        admin_message = bot.send_message.await_args.args[1]
+        self.assertIn("Тестовая оплата подтверждена", admin_message)
+        self.assertIn("User ID: <code>100</code>", admin_message)
 
     async def test_waitlist_assigns_first_user(self):
         with self.connection() as conn:

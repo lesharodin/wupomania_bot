@@ -55,6 +55,14 @@ with get_connection() as conn:
     CREATE INDEX IF NOT EXISTS idx_race_entries_race_status
     ON race_entries (race_id, status, created_at);
 
+    CREATE TABLE IF NOT EXISTS race_test_entries (
+        race_id INTEGER NOT NULL,
+        telegram_id INTEGER NOT NULL,
+        slot_id INTEGER NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (race_id, telegram_id)
+    );
+
     CREATE TABLE IF NOT EXISTS waitlist (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         race_id INTEGER,

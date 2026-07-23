@@ -45,6 +45,10 @@ ADMIN_HELP = """
 <code>/reset_test_entry</code>
 Освободить свой тестовый слот после завершения платежа. Работает только для черновика.
 
+<code>/delete_draft RACE_ID</code>
+Удалить пустой черновик гонки. Черновик не должен содержать участников, тестовых записей или занятых слотов.
+Пример: <code>/delete_draft 2</code>
+
 <b>Участники</b>
 <code>/users</code> — сводка активной гонки
 <code>/users all</code> — все участники гонки
@@ -632,6 +636,117 @@ async def reset_test_entry(message: Message):
         f"🎟 Slot ID: <code>{slot_id}</code> снова свободен\n"
         f"🧾 Payment ID: <code>{payment_id}</code>\n"
         f"Статус платежа: <code>{payment_status}</code>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("delete_draft"))
+async def delete_draft(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Формат:\n/delete_draft RACE_ID")
+        return
+
+    try:
+        race_id = int(parts[1])
+        if race_id <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ RACE_ID должен быть положительным числом")
+        return
+
+    error = None
+    race_title = None
+    slots_count = 0
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("""
+            SELECT title, status
+            FROM races
+            WHERE id = ?
+        """, (race_id,))
+        race = cursor.fetchone()
+
+        if not race:
+            error = f"❌ Гонка с ID {race_id} не найдена"
+        else:
+            race_title, race_status = race
+            if race_status != "draft":
+                error = (
+                    "❌ Удалять можно только черновики.\n"
+                    f"Текущий статус: {race_status}"
+                )
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM race_entries
+                    WHERE race_id = ?
+                """, (race_id,))
+                entries_count = cursor.fetchone()[0]
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM race_test_entries
+                    WHERE race_id = ?
+                """, (race_id,))
+                test_entries_count = cursor.fetchone()[0]
+                cursor.execute("""
+                    SELECT
+                        COUNT(*),
+                        SUM(
+                            CASE
+                                WHEN status != 'free' OR user_id IS NOT NULL
+                                THEN 1
+                                ELSE 0
+                            END
+                        )
+                    FROM race_slots
+                    WHERE race_id = ?
+                """, (race_id,))
+                slots_count, occupied_slots = cursor.fetchone()
+                occupied_slots = occupied_slots or 0
+
+                if entries_count or test_entries_count or occupied_slots:
+                    error = (
+                        "❌ Черновик не пуст и не был удален.\n"
+                        f"Записей участников: {entries_count}\n"
+                        f"Тестовых записей: {test_entries_count}\n"
+                        f"Занятых слотов: {occupied_slots}\n\n"
+                        "Для своего теста сначала используй /reset_test_entry."
+                    )
+                else:
+                    cursor.execute(
+                        "DELETE FROM race_slots WHERE race_id = ?",
+                        (race_id,),
+                    )
+                    cursor.execute(
+                        "DELETE FROM race_test_entries WHERE race_id = ?",
+                        (race_id,),
+                    )
+                    cursor.execute(
+                        "DELETE FROM races WHERE id = ? AND status = 'draft'",
+                        (race_id,),
+                    )
+                    if cursor.rowcount != 1:
+                        error = "❌ Не удалось удалить черновик"
+
+        if error:
+            conn.rollback()
+        else:
+            conn.commit()
+
+    if error:
+        await message.answer(error)
+        return
+
+    await message.answer(
+        "✅ <b>Черновик удален</b>\n"
+        f"🏁 {escape(race_title or 'Без названия')}\n"
+        f"🆔 Race ID: <code>{race_id}</code>\n"
+        f"Удалено свободных слотов: <b>{slots_count}</b>",
         parse_mode="HTML",
     )
 

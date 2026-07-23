@@ -335,6 +335,42 @@ class AdminUserListTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(markers, 0)
         self.assertEqual(payment, ("race_slot_test_reset", "reset"))
 
+    async def test_delete_draft_removes_empty_race_and_slots(self):
+        with self.connection() as conn:
+            conn.execute("""
+                INSERT INTO races (
+                    id, title, date, slots_total, status, created_at
+                )
+                VALUES (
+                    2, 'Wrong Date', '2026-08-01T00:00:00',
+                    2, 'draft', '2026-01-04T00:00:00'
+                )
+            """)
+            conn.execute("""
+                INSERT INTO race_slots (race_id, status)
+                VALUES (2, 'free'), (2, 'free')
+            """)
+            conn.commit()
+
+        message = self.message("/delete_draft 2")
+        with (
+            patch.object(admin, "get_connection", self.connection),
+            patch.object(admin, "is_admin", return_value=True),
+        ):
+            await admin.delete_draft(message)
+
+        with self.connection() as conn:
+            races = conn.execute(
+                "SELECT COUNT(*) FROM races WHERE id = 2"
+            ).fetchone()[0]
+            slots = conn.execute(
+                "SELECT COUNT(*) FROM race_slots WHERE race_id = 2"
+            ).fetchone()[0]
+        self.assertEqual(races, 0)
+        self.assertEqual(slots, 0)
+        response = message.answer.await_args.args[0]
+        self.assertIn("Черновик удален", response)
+
     def test_pages_stay_below_telegram_limit(self):
         blocks = [f"{index}. {'x' * 500}\n" for index in range(30)]
         pages = admin.build_user_pages("Заголовок", blocks)

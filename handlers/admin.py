@@ -1,12 +1,15 @@
+import asyncio
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from handlers.waitlist import try_assign_from_waitlist
 from handlers.sales import show_pass_form
-from database.db import get_connection
-from config import ADMINS, ADMIN_CHAT_ID
+from database.db import get_club_connection, get_connection
+from payments.service import create_payment
+from config import ADMINS, ADMIN_CHAT_ID, RESERVE_TIMEOUT_SECONDS
 
 router = Router()
 
@@ -33,6 +36,14 @@ ADMIN_HELP = """
 <code>/add_user TELEGRAM_ID</code>
 Записать пользователя на активную гонку без оплаты и отправить ему форму пропуска. У пользователя уже должен быть профиль в боте.
 Пример: <code>/add_user 123456789</code>
+
+<b>Тестирование оплаты</b>
+<code>/test_payment AMOUNT</code>
+Создать платеж только для себя на последнем черновике без открытия продаж и рассылки. По умолчанию сумма 1 ₽.
+Пример: <code>/test_payment 1</code>
+
+<code>/reset_test_entry</code>
+Освободить свой тестовый слот после завершения платежа. Работает только для черновика.
 
 <b>Участники</b>
 <code>/users</code> — сводка активной гонки
@@ -281,6 +292,347 @@ async def open_sales(message: Message):
         ADMIN_CHAT_ID,
         "🚀 <b>Продажи билетов открыты</b>",
         parse_mode="HTML"
+    )
+
+
+@router.message(Command("test_payment"))
+async def create_test_payment(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+    if len(parts) > 2:
+        await message.answer("❌ Формат:\n/test_payment AMOUNT")
+        return
+
+    try:
+        amount = int(parts[1]) if len(parts) == 2 else 1
+        if not 1 <= amount <= 1000:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ AMOUNT должен быть целым числом от 1 до 1000")
+        return
+
+    user_id = message.from_user.id
+    now = datetime.now().isoformat()
+    reserve_until = (
+        datetime.now() + timedelta(seconds=RESERVE_TIMEOUT_SECONDS)
+    ).isoformat()
+    error = None
+    slot_id = None
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("""
+            SELECT id, title
+            FROM races
+            WHERE status = 'draft'
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+        race = cursor.fetchone()
+        if not race:
+            error = (
+                "❌ Нет гонки в статусе draft.\n"
+                "Сначала создай ее через /create_race YYYY-MM-DD SLOTS."
+            )
+        else:
+            race_id, race_title = race
+            cursor.execute(
+                "SELECT fio FROM users WHERE telegram_id = ?",
+                (user_id,),
+            )
+            user = cursor.fetchone()
+            if not user:
+                error = (
+                    "❌ У тебя нет профиля участника.\n"
+                    "Сначала пройди регистрацию через /start."
+                )
+            else:
+                cursor.execute("""
+                    SELECT status
+                    FROM race_entries
+                    WHERE race_id = ?
+                      AND telegram_id = ?
+                """, (race_id, user_id))
+                existing_entry = cursor.fetchone()
+                if existing_entry:
+                    error = (
+                        "❌ Для тебя уже существует запись на этот черновик: "
+                        f"{existing_entry[0]}.\n"
+                        "После теста используй /reset_test_entry."
+                    )
+                else:
+                    cursor.execute("""
+                        SELECT id
+                        FROM race_slots
+                        WHERE race_id = ?
+                          AND status = 'free'
+                        ORDER BY id
+                        LIMIT 1
+                    """, (race_id,))
+                    slot = cursor.fetchone()
+                    if not slot:
+                        error = "❌ В черновике нет свободных слотов"
+                    else:
+                        slot_id = slot[0]
+                        cursor.execute("""
+                            UPDATE race_slots
+                            SET status = 'reserved',
+                                user_id = ?,
+                                reserved_until = ?
+                            WHERE id = ?
+                              AND status = 'free'
+                        """, (user_id, reserve_until, slot_id))
+                        if cursor.rowcount != 1:
+                            error = "❌ Не удалось зарезервировать тестовый слот"
+                        else:
+                            cursor.execute("""
+                                INSERT INTO race_entries (
+                                    race_id,
+                                    telegram_id,
+                                    slot_id,
+                                    status,
+                                    created_at,
+                                    updated_at
+                                )
+                                VALUES (?, ?, ?, 'reserved', ?, ?)
+                            """, (race_id, user_id, slot_id, now, now))
+                            cursor.execute("""
+                                INSERT INTO race_test_entries (
+                                    race_id,
+                                    telegram_id,
+                                    slot_id,
+                                    created_at
+                                )
+                                VALUES (?, ?, ?, ?)
+                            """, (race_id, user_id, slot_id, now))
+
+        if error:
+            conn.rollback()
+        else:
+            conn.commit()
+
+    if error:
+        await message.answer(error)
+        return
+
+    try:
+        payment_url = await asyncio.to_thread(
+            create_payment,
+            user_id=user_id,
+            amount=amount,
+            target_type="race_slot",
+            target_id=slot_id,
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            description=(
+                f"ТЕСТ Вупомания | tgid {user_id} | "
+                f"slot {slot_id} | {amount} RUB"
+            ),
+        )
+    except Exception:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE race_slots
+                SET status = 'free',
+                    user_id = NULL,
+                    reserved_until = NULL
+                WHERE id = ?
+                  AND status = 'reserved'
+                  AND user_id = ?
+            """, (slot_id, user_id))
+            cursor.execute("""
+                DELETE FROM race_entries
+                WHERE race_id = ?
+                  AND telegram_id = ?
+                  AND slot_id = ?
+                  AND status = 'reserved'
+            """, (race_id, user_id, slot_id))
+            cursor.execute("""
+                DELETE FROM race_test_entries
+                WHERE race_id = ?
+                  AND telegram_id = ?
+                  AND slot_id = ?
+            """, (race_id, user_id, slot_id))
+            conn.commit()
+        await message.answer(
+            "❌ Не удалось создать тестовый платеж. Слот освобожден."
+        )
+        return
+
+    payment_message = await message.answer(
+        "🧪 <b>Тестовый платеж создан</b>\n\n"
+        f"🏁 {escape(race_title or 'Без названия')}\n"
+        f"🎟 Slot ID: <code>{slot_id}</code>\n"
+        f"💳 Сумма: <b>{amount} ₽</b>\n"
+        "⏱ Платеж действует 10 минут.\n\n"
+        "Уведомления другим пользователям не отправлялись.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"💳 Оплатить {amount} ₽",
+                        url=payment_url,
+                    )
+                ]
+            ]
+        ),
+        parse_mode="HTML",
+    )
+
+    with get_connection() as conn:
+        conn.execute("""
+            UPDATE race_slots
+            SET chat_id = ?, message_id = ?
+            WHERE id = ?
+              AND status = 'reserved'
+              AND user_id = ?
+        """, (message.chat.id, payment_message.message_id, slot_id, user_id))
+        conn.commit()
+
+
+@router.message(Command("reset_test_entry"))
+async def reset_test_entry(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    if len(message.text.split()) != 1:
+        await message.answer("❌ Формат:\n/reset_test_entry")
+        return
+
+    user_id = message.from_user.id
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT re.race_id, re.slot_id, re.status, r.title
+            FROM race_entries re
+            JOIN races r ON r.id = re.race_id
+            JOIN race_test_entries rte
+              ON rte.race_id = re.race_id
+             AND rte.telegram_id = re.telegram_id
+             AND rte.slot_id = re.slot_id
+            WHERE re.telegram_id = ?
+              AND r.status = 'draft'
+            ORDER BY r.created_at DESC
+            LIMIT 1
+        """, (user_id,))
+        entry = cursor.fetchone()
+
+    if not entry:
+        await message.answer("ℹ️ Тестовая запись в черновике не найдена")
+        return
+
+    race_id, slot_id, entry_status, race_title = entry
+    with get_club_connection() as payment_conn:
+        payment_cursor = payment_conn.cursor()
+        payment_cursor.execute("""
+            SELECT id, status
+            FROM payments
+            WHERE user_id = ?
+              AND target_id = ?
+              AND target_type = 'race_slot'
+            ORDER BY id DESC
+            LIMIT 1
+        """, (user_id, slot_id))
+        payment = payment_cursor.fetchone()
+
+        if not payment:
+            await message.answer(
+                "❌ Для этой записи не найден тестовый платеж. "
+                "Слот автоматически не изменен."
+            )
+            return
+
+        payment_id, payment_status = payment
+        if payment_status not in ("succeeded", "canceled"):
+            await message.answer(
+                "⏳ Платеж еще не завершен. Оплати его или дождись отмены "
+                "в YooKassa, затем повтори /reset_test_entry."
+            )
+            return
+
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute("""
+                SELECT status, user_id
+                FROM race_slots
+                WHERE id = ?
+                  AND race_id = ?
+            """, (slot_id, race_id))
+            slot = cursor.fetchone()
+            slot_is_owned = (
+                slot
+                and slot[0] in ("reserved", "paid")
+                and slot[1] == user_id
+            )
+            slot_already_free = (
+                slot
+                and slot[0] == "free"
+                and slot[1] is None
+                and entry_status == "expired"
+            )
+            if not slot_is_owned and not slot_already_free:
+                conn.rollback()
+                await message.answer(
+                    "❌ Тестовый слот не найден или уже был освобожден"
+                )
+                return
+
+            if slot_is_owned:
+                cursor.execute("""
+                    UPDATE race_slots
+                    SET status = 'free',
+                        user_id = NULL,
+                        reserved_until = NULL,
+                        chat_id = NULL,
+                        message_id = NULL
+                    WHERE id = ?
+                      AND race_id = ?
+                      AND user_id = ?
+                """, (slot_id, race_id, user_id))
+
+            cursor.execute("""
+                DELETE FROM race_entries
+                WHERE race_id = ?
+                  AND telegram_id = ?
+                  AND slot_id = ?
+            """, (race_id, user_id, slot_id))
+            if cursor.rowcount != 1:
+                conn.rollback()
+                await message.answer("❌ Не удалось удалить тестовую запись")
+                return
+
+            cursor.execute("""
+                DELETE FROM race_test_entries
+                WHERE race_id = ?
+                  AND telegram_id = ?
+                  AND slot_id = ?
+            """, (race_id, user_id, slot_id))
+            if cursor.rowcount != 1:
+                conn.rollback()
+                await message.answer("❌ Не удалось удалить маркер теста")
+                return
+            conn.commit()
+
+        payment_cursor.execute("""
+            UPDATE payments
+            SET target_type = 'race_slot_test_reset',
+                ui_status = 'reset'
+            WHERE id = ?
+              AND target_type = 'race_slot'
+        """, (payment_id,))
+        payment_conn.commit()
+
+    await message.answer(
+        "✅ <b>Тестовая запись сброшена</b>\n"
+        f"🏁 {escape(race_title or 'Без названия')}\n"
+        f"🎟 Slot ID: <code>{slot_id}</code> снова свободен\n"
+        f"🧾 Payment ID: <code>{payment_id}</code>\n"
+        f"Статус платежа: <code>{payment_status}</code>",
+        parse_mode="HTML",
     )
 
 

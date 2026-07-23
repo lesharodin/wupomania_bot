@@ -42,7 +42,7 @@ async def payments_watcher(bot):
                     bot=bot,
                     payment_id=payment_id,
                     user_id=user_id,
-                    slot_id=slot_id
+                    slot_id=slot_id,
                 )
             except Exception as e:
                 logger.exception(
@@ -76,10 +76,11 @@ async def handle_race_payment(
     bot,
     payment_id: int,
     user_id: int,
-    slot_id: int
+    slot_id: int,
 ):
     review_reason = None
     already_processed = False
+    notify_admin = True
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -90,20 +91,32 @@ async def handle_race_payment(
                 rs.status,
                 rs.race_id,
                 rs.user_id,
-                re.status
+                re.status,
+                CASE WHEN rte.slot_id IS NULL THEN 0 ELSE 1 END
             FROM race_slots rs
             LEFT JOIN race_entries re
               ON re.race_id = rs.race_id
              AND re.telegram_id = ?
              AND re.slot_id = rs.id
+            LEFT JOIN race_test_entries rte
+              ON rte.race_id = rs.race_id
+             AND rte.telegram_id = ?
+             AND rte.slot_id = rs.id
             WHERE rs.id = ?
-        """, (user_id, slot_id))
+        """, (user_id, user_id, slot_id))
         row = cursor.fetchone()
 
         if not row:
             review_reason = "слот не найден"
         else:
-            slot_status, race_id, slot_user_id, entry_status = row
+            (
+                slot_status,
+                race_id,
+                slot_user_id,
+                entry_status,
+                is_test_payment,
+            ) = row
+            notify_admin = not bool(is_test_payment)
             already_processed = (
                 slot_status == "paid"
                 and slot_user_id == user_id
@@ -165,8 +178,9 @@ async def handle_race_payment(
             f"[payments_watcher] payment {payment_id} requires review: "
             f"{review_reason}"
         )
+        review_recipient = ADMIN_CHAT_ID if notify_admin else user_id
         await bot.send_message(
-            ADMIN_CHAT_ID,
+            review_recipient,
             (
                 "⚠️ <b>Оплата требует ручной проверки</b>\n\n"
                 f"🧾 Payment ID: <code>{payment_id}</code>\n"
@@ -188,27 +202,27 @@ async def handle_race_payment(
     # 4️⃣ показываем форму
     await show_pass_form(bot, user_id, slot_id)
 
-    # 5️⃣ лог админам
-    try:
-        chat_member = await bot.get_chat_member(user_id, user_id)
-        user_display = (
-            f"@{chat_member.user.username}"
-            if chat_member.user.username
-            else chat_member.user.full_name
-        )
-    except:
-        user_display = f"id {user_id}"
+    if notify_admin:
+        try:
+            chat_member = await bot.get_chat_member(user_id, user_id)
+            user_display = (
+                f"@{chat_member.user.username}"
+                if chat_member.user.username
+                else chat_member.user.full_name
+            )
+        except Exception:
+            user_display = f"id {user_id}"
 
-    await bot.send_message(
-        ADMIN_CHAT_ID,
-        (
-            "💳 <b>Оплата гонки подтверждена</b>\n\n"
-            f"👤 {user_display}\n"
-            f"🆔 Slot ID: <code>{slot_id}</code>\n"
-            f"🧾 Payment ID: <code>{payment_id}</code>\n"
-            "📄 Пользователю отправлена форма"
-        ),
-        parse_mode="HTML"
-    )
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            (
+                "💳 <b>Оплата гонки подтверждена</b>\n\n"
+                f"👤 {user_display}\n"
+                f"🆔 Slot ID: <code>{slot_id}</code>\n"
+                f"🧾 Payment ID: <code>{payment_id}</code>\n"
+                "📄 Пользователю отправлена форма"
+            ),
+            parse_mode="HTML"
+        )
 
     return PAYMENT_PROCESSED

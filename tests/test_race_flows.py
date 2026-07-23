@@ -37,6 +37,13 @@ CREATE TABLE race_entries (
     updated_at TEXT,
     UNIQUE(race_id, telegram_id)
 );
+CREATE TABLE race_test_entries (
+    race_id INTEGER NOT NULL,
+    telegram_id INTEGER NOT NULL,
+    slot_id INTEGER NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (race_id, telegram_id)
+);
 """
 
 
@@ -184,6 +191,38 @@ class RaceFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, payments_watcher.PAYMENT_PROCESSED)
         show_form.assert_not_awaited()
         bot.send_message.assert_not_awaited()
+
+    async def test_test_payment_does_not_notify_admin_chat(self):
+        self.insert_reserved_slot(slot_user_id=100)
+        with self.connection() as conn:
+            conn.execute("""
+                INSERT INTO race_test_entries (
+                    race_id, telegram_id, slot_id, created_at
+                )
+                VALUES (1, 100, 10, '2026-01-01T00:00:00')
+            """)
+            conn.commit()
+        bot = AsyncMock()
+
+        with (
+            patch.object(payments_watcher, "get_connection", self.connection),
+            patch.object(
+                payments_watcher,
+                "show_pass_form",
+                new=AsyncMock(),
+            ) as show_form,
+        ):
+            result = await payments_watcher.handle_race_payment(
+                bot=bot,
+                payment_id=503,
+                user_id=100,
+                slot_id=10,
+            )
+
+        self.assertEqual(result, payments_watcher.PAYMENT_PROCESSED)
+        show_form.assert_awaited_once_with(bot, 100, 10)
+        bot.send_message.assert_not_awaited()
+        bot.get_chat_member.assert_not_awaited()
 
     async def test_waitlist_assigns_first_user(self):
         with self.connection() as conn:

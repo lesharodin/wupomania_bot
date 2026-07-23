@@ -3,6 +3,7 @@ from datetime import datetime
 
 from database.db import get_connection
 from config import ADMIN_CHAT_ID
+from handlers.waitlist import try_assign_from_waitlist
 
 
 CHECK_INTERVAL = 30  # секунд
@@ -23,7 +24,8 @@ async def expire_reserved_slots(bot):
                     rs.chat_id,
                     rs.message_id,
                     rs.reserved_until,
-                    u.fio
+                    u.fio,
+                    rs.race_id
                 FROM race_slots rs
                 JOIN users u ON u.telegram_id = rs.user_id
                 WHERE rs.status = 'reserved'
@@ -37,7 +39,7 @@ async def expire_reserved_slots(bot):
 
         admin_lines = []
 
-        for slot_id, user_id, chat_id, message_id, reserved_until, fio in expired:
+        for slot_id, user_id, chat_id, message_id, reserved_until, fio, race_id in expired:
             # 1️⃣ освобождаем слот
             with get_connection() as conn:
                 cursor = conn.cursor()
@@ -52,10 +54,13 @@ async def expire_reserved_slots(bot):
                 """, (slot_id,))
 
                 cursor.execute("""
-                    UPDATE users
-                    SET status = 'registered'
-                    WHERE telegram_id = ?
-                """, (user_id,))
+                    UPDATE race_entries
+                    SET status = 'expired',
+                        updated_at = ?
+                    WHERE race_id = ?
+                      AND telegram_id = ?
+                      AND slot_id = ?
+                """, (datetime.now().isoformat(), race_id, user_id, slot_id))
                 conn.commit()
 
             # 2️⃣ удаляем сообщение оплаты
@@ -76,6 +81,14 @@ async def expire_reserved_slots(bot):
                 )
             except:
                 pass
+
+            try:
+                await try_assign_from_waitlist(bot, race_id)
+            except Exception as exc:
+                print(
+                    "[background] waitlist assignment failed "
+                    f"race_id={race_id}: {exc}"
+                )
 
             # 4️⃣ собираем лог админу
             admin_lines.append(
@@ -98,4 +111,3 @@ async def expire_reserved_slots(bot):
             )
         except:
             pass
-

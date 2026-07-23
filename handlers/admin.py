@@ -1,7 +1,10 @@
 from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from datetime import datetime
+from html import escape
 from handlers.waitlist import try_assign_from_waitlist
+from handlers.sales import show_pass_form
 from database.db import get_connection
 from config import ADMINS, ADMIN_CHAT_ID
 
@@ -12,10 +15,115 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMINS
 
 
+ADMIN_HELP = """
+🛠 <b>Администрирование гонки</b>
+
+<b>Создание и продажи</b>
+<code>/create_race YYYY-MM-DD SLOTS</code>
+Создать новую гонку в статусе черновика.
+Пример: <code>/create_race 2026-09-12 40</code>
+
+<code>/open_sales</code>
+Открыть продажи для последнего созданного черновика, закрыть предыдущую активную гонку и разослать уведомления всем профилям.
+
+<code>/add_slots COUNT</code>
+Добавить места в активную гонку. Новые места автоматически предлагаются участникам вейтлиста.
+Пример: <code>/add_slots 5</code>
+
+<code>/add_user TELEGRAM_ID</code>
+Записать пользователя на активную гонку без оплаты и отправить ему форму пропуска. У пользователя уже должен быть профиль в боте.
+Пример: <code>/add_user 123456789</code>
+
+<b>Участники</b>
+<code>/users</code> — сводка активной гонки
+<code>/users all</code> — все участники гонки
+<code>/users profiles</code> — все профили в базе
+<code>/users reserved</code> — ожидают оплату
+<code>/users paid</code> — оплатили, но не подтвердили форму
+<code>/users form_confirmed</code> — полностью записаны
+<code>/users waitlist</code> — лист ожидания
+<code>/users expired</code> — истекшие резервы
+<code>/users cancelled</code> — отмененные записи
+
+Запросы на отмену подтверждаются или отклоняются кнопками в сообщении администратора.
+""".strip()
+
+
+USER_FILTERS = {
+    "all": None,
+    "reserved": "reserved",
+    "paid": "paid",
+    "not_form": "paid",
+    "form_confirmed": "form_confirmed",
+    "waitlist": "waitlist",
+    "expired": "expired",
+    "cancelled": "cancelled",
+}
+
+
+def build_user_pages(header: str, blocks: list[str]) -> list[str]:
+    if not blocks:
+        return [f"{header}\nЗаписей не найдено."]
+
+    body_limit = 3300
+    bodies = []
+    current = ""
+    for block in blocks:
+        if current and len(current) + len(block) > body_limit:
+            bodies.append(current.rstrip())
+            current = ""
+        current += block
+    if current:
+        bodies.append(current.rstrip())
+
+    total = len(bodies)
+    return [
+        f"{header}\nСтраница {index}/{total}\n\n{body}"
+        for index, body in enumerate(bodies, start=1)
+    ]
+
+
+@router.message(Command("admin"))
+async def admin_help(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, title, date
+            FROM races
+            WHERE status = 'sales_open'
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+        active_race = cursor.fetchone()
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM races
+            WHERE status = 'draft'
+        """)
+        drafts_count = cursor.fetchone()[0]
+
+    state = "\n\n<b>Текущее состояние</b>\n"
+    if active_race:
+        race_id, title, race_date = active_race
+        state += (
+            f"Активная гонка: <b>{escape(title or 'Без названия')}</b>\n"
+            f"ID: <code>{race_id}</code>, дата: "
+            f"<code>{escape(race_date or 'не указана')}</code>\n"
+        )
+    else:
+        state += "Активной гонки нет.\n"
+    state += f"Черновиков: <b>{drafts_count}</b>"
+
+    await message.answer(ADMIN_HELP + state, parse_mode="HTML")
+
+
 # =========================
 # CREATE RACE
 # =========================
-@router.message(F.text.startswith("/create_race"))
+@router.message(Command("create_race"))
 async def create_race(message: Message):
     if not is_admin(message.from_user.id):
         return
@@ -35,6 +143,9 @@ async def create_race(message: Message):
         slots_total = int(slots_str)
     except Exception:
         await message.answer("❌ Неверный формат даты или количества слотов")
+        return
+    if slots_total <= 0:
+        await message.answer("❌ Количество слотов должно быть больше нуля")
         return
 
     with get_connection() as conn:
@@ -91,9 +202,12 @@ async def create_race(message: Message):
 # =========================
 # OPEN SALES
 # =========================
-@router.message(F.text == "/open_sales")
+@router.message(Command("open_sales"))
 async def open_sales(message: Message):
     if not is_admin(message.from_user.id):
+        return
+    if len(message.text.split()) != 1:
+        await message.answer("❌ Формат:\n/open_sales")
         return
 
     with get_connection() as conn:
@@ -116,6 +230,12 @@ async def open_sales(message: Message):
 
         cursor.execute("""
             UPDATE races
+            SET status = 'closed'
+            WHERE status = 'sales_open'
+        """)
+
+        cursor.execute("""
+            UPDATE races
             SET status = 'sales_open'
             WHERE id = ?
         """, (race_id,))
@@ -125,33 +245,37 @@ async def open_sales(message: Message):
         cursor.execute("""
             SELECT telegram_id
             FROM users
-            WHERE status = 'registered'
+            WHERE telegram_id IS NOT NULL
         """)
         users = cursor.fetchall()
 
-        for (telegram_id,) in users:
-            try:
-                await message.bot.send_message(
-                    telegram_id,
-                    (
-                        "🚀 <b>Продажи билетов на гонку открыты!</b>\n\n"
-                        "🎟 Количество мест ограничено.\n"
-                        "⏱ Успей записаться.\n\n"
-                        "👇 Нажми кнопку ниже:"
-                    ),
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [InlineKeyboardButton(
-                                text="🎟 Записаться на гонку",
-                                callback_data="buy_ticket"
-                            )]
-                        ]
-                    ),
-                    parse_mode="HTML"
-                )
-            except:
-                pass  # пользователь мог заблокировать бота
-    await message.answer("🚀 Продажи открыты")
+    delivered = 0
+    for (telegram_id,) in users:
+        try:
+            await message.bot.send_message(
+                telegram_id,
+                (
+                    "🚀 <b>Продажи билетов на гонку открыты!</b>\n\n"
+                    "🎟 Количество мест ограничено.\n"
+                    "⏱ Успей записаться.\n\n"
+                    "👇 Нажми кнопку ниже:"
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text="🎟 Записаться на гонку",
+                            callback_data="buy_ticket"
+                        )]
+                    ]
+                ),
+                parse_mode="HTML"
+            )
+            delivered += 1
+        except Exception:
+            pass  # пользователь мог заблокировать бота
+    await message.answer(
+        f"🚀 Продажи открыты. Уведомлений доставлено: {delivered}/{len(users)}"
+    )
 
     await message.bot.send_message(
         ADMIN_CHAT_ID,
@@ -160,103 +284,353 @@ async def open_sales(message: Message):
     )
 
 
+@router.message(Command("add_user"))
+async def add_user_without_payment(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Формат:\n/add_user TELEGRAM_ID")
+        return
+
+    try:
+        user_id = int(parts[1])
+        if user_id <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ TELEGRAM_ID должен быть положительным числом")
+        return
+
+    now = datetime.now().isoformat()
+    error = None
+    slot_id = None
+    fio = None
+    already_registered = False
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+
+        cursor.execute("""
+            SELECT id, title
+            FROM races
+            WHERE status = 'sales_open'
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+        race = cursor.fetchone()
+        if not race:
+            error = "❌ Нет активной гонки с открытыми продажами"
+        else:
+            race_id, race_title = race
+            cursor.execute("""
+                SELECT fio
+                FROM users
+                WHERE telegram_id = ?
+            """, (user_id,))
+            user = cursor.fetchone()
+            if not user:
+                error = (
+                    "❌ Профиль пользователя не найден.\n"
+                    "Пользователь должен сначала нажать /start и заполнить ФИО."
+                )
+            else:
+                fio = user[0]
+                cursor.execute("""
+                    SELECT slot_id, status
+                    FROM race_entries
+                    WHERE race_id = ?
+                      AND telegram_id = ?
+                """, (race_id, user_id))
+                entry = cursor.fetchone()
+
+                if entry and entry[1] == "form_confirmed":
+                    error = (
+                        "ℹ️ Пользователь уже полностью записан на активную гонку"
+                    )
+                elif entry and entry[1] == "paid":
+                    slot_id = entry[0]
+                    already_registered = True
+                elif entry and entry[1] == "reserved":
+                    slot_id = entry[0]
+                    cursor.execute("""
+                        UPDATE race_slots
+                        SET status = 'paid',
+                            reserved_until = NULL,
+                            chat_id = NULL,
+                            message_id = NULL
+                        WHERE id = ?
+                          AND race_id = ?
+                          AND user_id = ?
+                          AND status = 'reserved'
+                    """, (slot_id, race_id, user_id))
+                    if cursor.rowcount != 1:
+                        error = (
+                            "❌ Резерв пользователя поврежден. "
+                            "Проверь запись через /users reserved."
+                        )
+                else:
+                    cursor.execute("""
+                        SELECT id
+                        FROM race_slots
+                        WHERE race_id = ?
+                          AND status = 'free'
+                        ORDER BY id
+                        LIMIT 1
+                    """, (race_id,))
+                    slot = cursor.fetchone()
+                    if not slot:
+                        error = (
+                            "❌ Свободных мест нет.\n"
+                            "Сначала добавь места командой /add_slots COUNT."
+                        )
+                    else:
+                        slot_id = slot[0]
+                        cursor.execute("""
+                            UPDATE race_slots
+                            SET status = 'paid',
+                                user_id = ?,
+                                reserved_until = NULL,
+                                chat_id = NULL,
+                                message_id = NULL
+                            WHERE id = ?
+                              AND status = 'free'
+                        """, (user_id, slot_id))
+                        if cursor.rowcount != 1:
+                            error = "❌ Не удалось назначить свободный слот"
+
+                if not error and not already_registered:
+                    cursor.execute("""
+                        INSERT INTO race_entries (
+                            race_id,
+                            telegram_id,
+                            slot_id,
+                            status,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (?, ?, ?, 'paid', ?, ?)
+                        ON CONFLICT(race_id, telegram_id)
+                        DO UPDATE SET
+                            slot_id = excluded.slot_id,
+                            status = 'paid',
+                            updated_at = excluded.updated_at
+                    """, (race_id, user_id, slot_id, now, now))
+
+        if error:
+            conn.rollback()
+        else:
+            conn.commit()
+
+    if error:
+        await message.answer(error)
+        return
+
+    notification_sent = True
+    try:
+        await show_pass_form(
+            message.bot,
+            user_id,
+            slot_id,
+            payment_received=False,
+        )
+    except Exception:
+        notification_sent = False
+
+    result_title = (
+        "ℹ️ <b>Форма отправлена повторно</b>\n"
+        if already_registered
+        else "✅ <b>Пользователь записан без оплаты</b>\n"
+    )
+    result = (
+        result_title
+        +
+        f"👤 {escape(fio or 'Без ФИО')}\n"
+        f"🆔 User ID: <code>{user_id}</code>\n"
+        f"🎟 Slot ID: <code>{slot_id}</code>\n"
+        f"🏁 {escape(race_title or 'Без названия')}\n"
+        f"📨 Форма отправлена: <b>{'да' if notification_sent else 'нет'}</b>"
+    )
+    await message.answer(result, parse_mode="HTML")
+
+    if message.chat.id != ADMIN_CHAT_ID:
+        await message.bot.send_message(
+            ADMIN_CHAT_ID,
+            result,
+            parse_mode="HTML",
+        )
+
+
 STATUS_LABELS = {
-    "registered": "📝 Зарегистрирован",
     "reserved": "⏳ Резерв (ждёт оплату)",
     "paid": "💳 Оплатил",
     "form_confirmed": "✅ Оплатил + заполнил форму",
     "waitlist": "📥 Лист ожидания",
+    "expired": "⏱ Резерв истёк",
+    "cancelled": "❌ Отменён",
 }
 
 
-@router.message(F.text.startswith("/users"))
+@router.message(Command("users"))
 async def list_users(message: Message):
     if not is_admin(message.from_user.id):
         return
 
     parts = message.text.split()
-    filter_arg = parts[1] if len(parts) > 1 else None
+    filter_arg = parts[1].lower() if len(parts) > 1 else None
+    if len(parts) > 2:
+        await message.answer(
+            "❌ Слишком много аргументов.\nИспользуй <code>/admin</code>.",
+            parse_mode="HTML",
+        )
+        return
+    if filter_arg not in ({None, "profiles"} | set(USER_FILTERS)):
+        await message.answer(
+            "❌ Неизвестный фильтр.\nИспользуй <code>/admin</code>.",
+            parse_mode="HTML",
+        )
+        return
 
     with get_connection() as conn:
         cursor = conn.cursor()
-
-        # ---------- СТАТИСТИКА ----------
-        cursor.execute("""
-            SELECT status, COUNT(*)
-            FROM users
-            GROUP BY status
-        """)
-        stats = dict(cursor.fetchall())
-
         cursor.execute("SELECT COUNT(*) FROM users")
-        total = cursor.fetchone()[0]
+        profiles_total = cursor.fetchone()[0]
 
-        # ---------- ВЫБОРКА С ФИЛЬТРОМ ----------
-        if filter_arg == "not_form":
+        if filter_arg == "profiles":
             cursor.execute("""
-                SELECT telegram_id, fio, video_system, drone_size, status
+                SELECT telegram_id, fio
                 FROM users
-                WHERE status = 'paid'
-                   OR (status = 'form_confirmed' AND COALESCE(form_confirmed, 0) = 0)
-                ORDER BY created_at
+                WHERE telegram_id IS NOT NULL
+                ORDER BY created_at, id
             """)
-        elif filter_arg:
-            cursor.execute("""
-                SELECT telegram_id, fio, video_system, drone_size, status
-                FROM users
-                WHERE status = ?
-                ORDER BY created_at
-            """, (filter_arg,))
+            profile_rows = cursor.fetchall()
+            race = None
         else:
+            profile_rows = None
+
             cursor.execute("""
-                SELECT telegram_id, fio, video_system, drone_size, status
-                FROM users
-                ORDER BY created_at
+                SELECT id, title, date
+                FROM races
+                WHERE status = 'sales_open'
+                ORDER BY created_at DESC
+                LIMIT 1
             """)
+            race = cursor.fetchone()
 
-        rows = cursor.fetchall()
+        if race:
+            race_id, race_title, race_date = race
 
-    # ---------- СООБЩЕНИЕ СО СЧЁТЧИКАМИ ----------
-    header = (
-        "📊 <b>Статистика участников</b>\n\n"
-        f"Всего: <b>{total}</b>\n"
-        f"📝 Зарегистрированы: {stats.get('registered', 0)}\n"
-        f"⏳ Резерв: {stats.get('reserved', 0)}\n"
-        f"💳 Оплатили: {stats.get('paid', 0)}\n"
-        f"✅ Оплатили + форма: {stats.get('form_confirmed', 0)}\n"
-        f"📥 Лист ожидания: {stats.get('waitlist', 0)}\n\n"
+            cursor.execute("""
+                SELECT status, COUNT(*)
+                FROM race_entries
+                WHERE race_id = ?
+                GROUP BY status
+            """, (race_id,))
+            stats = dict(cursor.fetchall())
+
+            cursor.execute("""
+                SELECT status, COUNT(*)
+                FROM race_slots
+                WHERE race_id = ?
+                GROUP BY status
+            """, (race_id,))
+            slot_stats = dict(cursor.fetchall())
+            slots_total = sum(slot_stats.values())
+
+            rows = []
+            if filter_arg:
+                status_filter = USER_FILTERS[filter_arg]
+                query = """
+                    SELECT
+                        u.telegram_id,
+                        u.fio,
+                        re.status,
+                        re.created_at
+                    FROM race_entries re
+                    JOIN users u ON u.telegram_id = re.telegram_id
+                    WHERE re.race_id = ?
+                """
+                params = [race_id]
+                if status_filter:
+                    query += " AND re.status = ?"
+                    params.append(status_filter)
+                query += " ORDER BY re.created_at, re.id"
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+
+    if filter_arg == "profiles":
+        header = (
+            "👥 <b>Все профили</b>\n"
+            f"Всего: <b>{len(profile_rows)}</b>"
+        )
+        blocks = [
+            (
+                f"{index}. <a href='tg://user?id={tg_id}'>"
+                f"<b>{escape(fio or 'Без ФИО')}</b></a>\n"
+                f"ID: <code>{tg_id}</code>\n\n"
+            )
+            for index, (tg_id, fio) in enumerate(profile_rows, start=1)
+        ]
+        for page in build_user_pages(header, blocks):
+            await message.answer(page, parse_mode="HTML")
+        return
+
+    if not race:
+        await message.answer(
+            "📊 <b>Профили</b>\n"
+            f"Всего в базе: <b>{profiles_total}</b>\n\n"
+            "Активной гонки нет.\n"
+            "Список профилей: <code>/users profiles</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    race_title_safe = escape(race_title or "Без названия")
+    race_date_safe = escape(race_date or "не указана")
+    summary = (
+        "📊 <b>Активная гонка</b>\n"
+        f"<b>{race_title_safe}</b>\n"
+        f"ID: <code>{race_id}</code> · дата: <code>{race_date_safe}</code>\n\n"
+        f"Профилей в базе: <b>{profiles_total}</b>\n"
+        f"Слотов: <b>{slots_total}</b> · "
+        f"свободно: <b>{slot_stats.get('free', 0)}</b>\n"
+        f"Резерв: <b>{stats.get('reserved', 0)}</b>\n"
+        f"Оплатили, форма не подтверждена: <b>{stats.get('paid', 0)}</b>\n"
+        f"Полностью записаны: <b>{stats.get('form_confirmed', 0)}</b>\n"
+        f"Вейтлист: <b>{stats.get('waitlist', 0)}</b>\n"
+        f"Истекшие резервы: <b>{stats.get('expired', 0)}</b>\n"
+        f"Отменены: <b>{stats.get('cancelled', 0)}</b>"
     )
 
-    if filter_arg:
-        header += f"🔎 <b>Фильтр:</b> {filter_arg}\n\n"
+    if not filter_arg:
+        await message.answer(
+            summary
+            + "\n\nСписки и фильтры: <code>/admin</code>",
+            parse_mode="HTML",
+        )
+        return
 
-    messages = []
-    current = header
-
-    # ---------- СПИСОК ----------
-    for tg_id, fio, video, drone, status in rows:
-        profile_link = f"<a href='tg://user?id={tg_id}'>Открыть профиль</a>"
-        status_label = STATUS_LABELS.get(status, status)
-
-        block = (
-            f"👤 <b>{fio}</b>\n"
-            f"🔗 {profile_link}\n"
-            f" TGID {tg_id}\n"
-            f"📌 Статус: <b>{status_label}</b>\n"
-            "────────────\n"
+    filter_label = (
+        "все участники"
+        if filter_arg == "all"
+        else STATUS_LABELS.get(USER_FILTERS[filter_arg], filter_arg)
+    )
+    header = (
+        f"👥 <b>{escape(filter_label)}</b>\n"
+        f"Гонка: <b>{race_title_safe}</b> · найдено: <b>{len(rows)}</b>"
+    )
+    blocks = []
+    for index, (tg_id, fio, status, created_at) in enumerate(rows, start=1):
+        status_label = escape(STATUS_LABELS.get(status, status))
+        blocks.append(
+            f"{index}. <a href='tg://user?id={tg_id}'>"
+            f"<b>{escape(fio or 'Без ФИО')}</b></a>\n"
+            f"ID: <code>{tg_id}</code> · {status_label}\n\n"
         )
 
-        if len(current) + len(block) > 3800:
-            messages.append(current)
-            current = ""
-
-        current += block
-
-    if current:
-        messages.append(current)
-
-    for msg in messages:
-        await message.answer(msg, parse_mode="HTML")
+    for page in build_user_pages(header, blocks):
+        await message.answer(page, parse_mode="HTML")
 
 # =========================
 # CONFIRM CANCEL (ADMIN)
@@ -272,16 +646,18 @@ async def cancel_confirm(callback: CallbackQuery):
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # берём user_id и race_id
+        # берём user_id и race_id только для новой модели участия
         cursor.execute("""
-            SELECT user_id, race_id
-            FROM race_slots
-            WHERE id = ?
+            SELECT rs.user_id, rs.race_id
+            FROM race_slots rs
+            JOIN race_entries re ON re.slot_id = rs.id
+            WHERE rs.id = ?
+              AND re.status IN ('paid', 'form_confirmed')
         """, (slot_id,))
         row = cursor.fetchone()
 
         if not row:
-            await callback.answer("Слот не найден", show_alert=True)
+            await callback.answer("Активная запись не найдена", show_alert=True)
             return
 
         user_id, race_id = row
@@ -297,13 +673,15 @@ async def cancel_confirm(callback: CallbackQuery):
             WHERE id = ?
         """, (slot_id,))
 
-        # обновляем пользователя
+        # обновляем участие в гонке
         cursor.execute("""
-            UPDATE users
+            UPDATE race_entries
             SET status = 'cancelled',
-                refund_pending = 1
-            WHERE telegram_id = ?
-        """, (user_id,))
+                updated_at = ?
+            WHERE race_id = ?
+              AND telegram_id = ?
+              AND slot_id = ?
+        """, (datetime.now().isoformat(), race_id, user_id, slot_id))
 
         conn.commit()
 
@@ -362,7 +740,7 @@ async def cancel_abort_admin(callback: CallbackQuery):
 # =========================
 # ADD SLOTS TO ACTIVE RACE
 # =========================
-@router.message(F.text.startswith("/add_slots"))
+@router.message(Command("add_slots"))
 async def add_slots(message: Message):
     if not is_admin(message.from_user.id):
         return
@@ -406,6 +784,12 @@ async def add_slots(message: Message):
                 VALUES (?, 'free')
             """, (race_id,))
 
+        cursor.execute("""
+            UPDATE races
+            SET slots_total = COALESCE(slots_total, 0) + ?
+            WHERE id = ?
+        """, (count, race_id))
+
         conn.commit()
 
     await message.answer(
@@ -445,4 +829,3 @@ async def add_slots(message: Message):
             ),
             parse_mode="HTML"
         )
-

@@ -3,26 +3,13 @@ import uuid
 import requests
 from datetime import datetime
 from requests.auth import HTTPBasicAuth
-import os
 from logging_config import logger
 from typing import Optional
+from config import PAYMENT_DB_PATH, YOOKASSA_SECRET_KEY, YOOKASSA_SHOP_ID
 
 
-YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
-YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
 YOOKASSA_API_URL = "https://api.yookassa.ru/v3/payments"
-
-
-
-BASE_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
-)
-
-CLUB_DB_PATH = "/home/lesharodin/whoopclub_bot/database/bot.db"
-logger.info(f"Using CLUB_DB_PATH = {CLUB_DB_PATH}")
-
-
-
+logger.info(f"Using PAYMENT_DB_PATH = {PAYMENT_DB_PATH}")
 
 def create_payment(
     *,
@@ -43,7 +30,7 @@ def create_payment(
 
     now = datetime.now().isoformat()
 
-    conn = sqlite3.connect(CLUB_DB_PATH)
+    conn = sqlite3.connect(PAYMENT_DB_PATH, timeout=10)
     cursor = conn.cursor()
 
     # 1️⃣ записываем payment в БД

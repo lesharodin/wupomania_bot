@@ -10,7 +10,7 @@ from aiogram.fsm.state import StatesGroup, State
 from datetime import datetime
 
 from database.db import get_connection
-from config import ADMIN_CHAT_ID, RULES_URL
+from config import ADMIN_CHAT_ID, PARTICIPATION_PRICE_RUB, RULES_URL
 
 router = Router()
 
@@ -133,7 +133,7 @@ async def enter_fio(message: Message, state: FSMContext):
             "✅ <b>Регистрация завершена!</b>\n\n"
             "🚀 Продажи билетов уже открыты!\n"
             "Вы можешете записаться на гонку прямо сейчас 👇\n"
-            "<b>Стоимость участия 2000р</b>",
+            f"<b>Стоимость участия {PARTICIPATION_PRICE_RUB} ₽</b>",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(

@@ -15,7 +15,7 @@ from config import (
 
 router = Router()
 
-PASS_FORM_URL = "https://forms.yandex.ru/u/6984f9c3068ff03215f42371/"
+PASS_FORM_URL = "https://forms.yandex.ru/u/6a22fb1eeb6146117d653108"
 
 ENTRY_MESSAGES = {
     "reserved": "⏳ У тебя уже есть активный резерв на эту гонку.",

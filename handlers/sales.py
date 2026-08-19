@@ -270,6 +270,7 @@ async def show_pass_form(
     slot_id: int,
     *,
     payment_received: bool = True,
+    reminder: bool = False,
 ):
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -279,16 +280,21 @@ async def show_pass_form(
         fio = cursor.fetchone()[0]
 
     form_url = build_prefilled_form_url(PASS_FORM_URL, fio)
-    title = (
-        "✅ <b>Оплата получена</b>"
-        if payment_received
-        else "✅ <b>Участие подтверждено администратором</b>"
-    )
+    if reminder:
+        title = "⏰ <b>Напоминание</b>"
+        prompt = "Пожалуйста, заполните форму для прохода на территорию:"
+    else:
+        title = (
+            "✅ <b>Оплата получена</b>"
+            if payment_received
+            else "✅ <b>Участие подтверждено администратором</b>"
+        )
+        prompt = "Заполните форму для прохода на территорию:"
 
     await bot.send_message(
         user_id,
         f"{title}\n\n"
-        "Заполните форму для прохода на территорию:",
+        f"{prompt}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[

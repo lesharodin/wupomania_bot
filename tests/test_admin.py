@@ -165,6 +165,66 @@ class AdminUserListTests(unittest.IsolatedAsyncioTestCase):
         response = message.answer.await_args.args[0]
         self.assertIn("Неизвестный фильтр", response)
 
+    async def test_remind_form_sends_only_to_valid_paid_entries(self):
+        with self.connection() as conn:
+            conn.execute("""
+                INSERT INTO race_slots (race_id, status, user_id)
+                VALUES (1, 'paid', 300)
+            """)
+            conn.execute("""
+                INSERT INTO race_entries (
+                    race_id, telegram_id, slot_id, status, created_at
+                ) VALUES (1, 300, 3, 'form_confirmed', '2026-01-03T00:00:00')
+            """)
+            conn.commit()
+
+        message = self.message("/remind_form")
+        with (
+            patch.object(admin, "get_connection", self.connection),
+            patch.object(admin, "is_admin", return_value=True),
+            patch.object(
+                admin,
+                "show_pass_form",
+                new=AsyncMock(),
+            ) as show_form,
+        ):
+            await admin.remind_unconfirmed_form(message)
+
+        show_form.assert_awaited_once_with(
+            message.bot,
+            100,
+            1,
+            reminder=True,
+        )
+        response = message.answer.await_args.args[0]
+        self.assertIn("Найдено: <b>1</b>", response)
+        self.assertIn("Отправлено: <b>1</b>", response)
+
+    async def test_remind_form_skips_test_entries(self):
+        with self.connection() as conn:
+            conn.execute("""
+                INSERT INTO race_test_entries (
+                    race_id, telegram_id, slot_id, created_at
+                ) VALUES (1, 100, 1, '2026-01-01T00:00:00')
+            """)
+            conn.commit()
+
+        message = self.message("/remind_form")
+        with (
+            patch.object(admin, "get_connection", self.connection),
+            patch.object(admin, "is_admin", return_value=True),
+            patch.object(
+                admin,
+                "show_pass_form",
+                new=AsyncMock(),
+            ) as show_form,
+        ):
+            await admin.remind_unconfirmed_form(message)
+
+        show_form.assert_not_awaited()
+        response = message.answer.await_args.args[0]
+        self.assertIn("Найдено: <b>0</b>", response)
+
     async def test_add_user_assigns_free_slot_without_payment(self):
         message = self.message("/add_user 300")
         with (

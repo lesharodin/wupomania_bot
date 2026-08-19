@@ -1,6 +1,7 @@
 import asyncio
 
 from aiogram import Router, F
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from datetime import datetime, timedelta
@@ -8,6 +9,7 @@ from html import escape
 from handlers.waitlist import try_assign_from_waitlist
 from handlers.sales import show_pass_form
 from database.db import get_club_connection, get_connection
+from logging_config import logger
 from payments.service import create_payment
 from config import ADMINS, ADMIN_CHAT_ID, RESERVE_TIMEOUT_SECONDS
 
@@ -59,6 +61,9 @@ ADMIN_HELP = """
 <code>/users waitlist</code> — лист ожидания
 <code>/users expired</code> — истекшие резервы
 <code>/users cancelled</code> — отмененные записи
+
+<code>/remind_form</code>
+Напомнить оплатившим участникам активной гонки, которые ещё не подтвердили форму, заполнить её.
 
 Запросы на отмену подтверждаются или отклоняются кнопками в сообщении администратора.
 """.strip()
@@ -937,6 +942,83 @@ STATUS_LABELS = {
     "expired": "⏱ Резерв истёк",
     "cancelled": "❌ Отменён",
 }
+
+
+@router.message(Command("remind_form"))
+async def remind_unconfirmed_form(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    if len(message.text.split()) != 1:
+        await message.answer(
+            "❌ Команда не принимает аргументы.\n"
+            "Используй <code>/remind_form</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, title
+            FROM races
+            WHERE status = 'sales_open'
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+        race = cursor.fetchone()
+        if race:
+            race_id, race_title = race
+            cursor.execute("""
+                SELECT re.telegram_id, re.slot_id
+                FROM race_entries re
+                JOIN race_slots rs
+                  ON rs.id = re.slot_id
+                 AND rs.race_id = re.race_id
+                 AND rs.user_id = re.telegram_id
+                 AND rs.status = 'paid'
+                LEFT JOIN race_test_entries rte
+                  ON rte.race_id = re.race_id
+                 AND rte.telegram_id = re.telegram_id
+                WHERE re.race_id = ?
+                  AND re.status = 'paid'
+                  AND rte.telegram_id IS NULL
+                ORDER BY re.created_at, re.id
+            """, (race_id,))
+            recipients = cursor.fetchall()
+
+    if not race:
+        await message.answer("❌ Нет активной гонки с открытыми продажами.")
+        return
+
+    sent = 0
+    failed = 0
+    for user_id, slot_id in recipients:
+        try:
+            await show_pass_form(
+                message.bot,
+                user_id,
+                slot_id,
+                reminder=True,
+            )
+            sent += 1
+        except TelegramAPIError:
+            failed += 1
+            logger.exception(
+                "Failed to send form reminder: race_id=%s user_id=%s slot_id=%s",
+                race_id,
+                user_id,
+                slot_id,
+            )
+
+    result = (
+        "📨 <b>Напоминания о форме отправлены</b>\n"
+        f"Гонка: <b>{escape(race_title or 'Без названия')}</b>\n"
+        f"Найдено: <b>{len(recipients)}</b>\n"
+        f"Отправлено: <b>{sent}</b>\n"
+        f"Ошибок доставки: <b>{failed}</b>"
+    )
+    await message.answer(result, parse_mode="HTML")
 
 
 @router.message(Command("users"))

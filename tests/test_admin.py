@@ -149,10 +149,22 @@ class AdminUserListTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Иван", response)
 
     async def test_users_all_returns_escaped_compact_list(self):
-        message = await self.call_users("/users all")
+        message = self.message("/users all")
+        with (
+            patch.object(admin, "get_connection", self.connection),
+            patch.object(admin, "is_admin", return_value=True),
+            patch.object(
+                admin,
+                "send_users_all_rich",
+                new=AsyncMock(),
+            ) as send_rich,
+        ):
+            await admin.list_users(message)
 
-        message.answer.assert_awaited_once()
-        response = message.answer.await_args.args[0]
+        send_rich.assert_awaited_once()
+        response = send_rich.await_args.args[1]
+        self.assertIn("<details>", response)
+        self.assertIn("<table bordered striped>", response)
         self.assertIn("Иван &lt;Пилот&gt;", response)
         self.assertIn("Петр Второй", response)
         self.assertIn("Race &amp; Test", response)

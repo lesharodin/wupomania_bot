@@ -1,7 +1,7 @@
 # WhoopMania Bot
 
-![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
-![aiogram](https://img.shields.io/badge/aiogram-3.4-2CA5E0?logo=telegram&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![aiogram](https://img.shields.io/badge/aiogram-3.30-2CA5E0?logo=telegram&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-race%20data-003B57?logo=sqlite&logoColor=white)
 ![YooKassa](https://img.shields.io/badge/YooKassa-SBP-0066FF)
 
@@ -278,4 +278,3 @@ sudo systemctl status wupomania-bot.service --no-pager
 - Перед ручными изменениями SQLite делайте резервную копию.
 - Поздние и спорные платежи требуют ручной проверки и не должны автоматически
   подтверждать переуступленный слот.
-

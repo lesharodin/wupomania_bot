@@ -103,6 +103,46 @@ def build_user_pages(header: str, blocks: list[str]) -> list[str]:
     ]
 
 
+def build_users_all_rich_html(
+    race_title: str,
+    rows: list[tuple],
+) -> str:
+    table_rows = []
+    for index, (tg_id, fio, status, _) in enumerate(rows, start=1):
+        table_rows.append(
+            "<tr>"
+            f"<td>{index}</td>"
+            f"<td><a href='tg://user?id={tg_id}'>"
+            f"{escape(fio or 'Без ФИО')}</a></td>"
+            f"<td><code>{tg_id}</code></td>"
+            f"<td>{escape(STATUS_LABELS.get(status, status))}</td>"
+            "</tr>"
+        )
+
+    table = (
+        "<table bordered striped>"
+        "<tr><th>№</th><th>Участник</th><th>Telegram ID</th>"
+        "<th>Статус</th></tr>"
+        f"{''.join(table_rows)}"
+        "</table>"
+    )
+    return (
+        "<h3>👥 Все участники гонки</h3>"
+        f"<p>Гонка: <b>{escape(race_title or 'Без названия')}</b></p>"
+        f"<details><summary>Показать список — {len(rows)}</summary>"
+        f"{table}</details>"
+    )
+
+
+async def send_users_all_rich(message: Message, rich_html: str):
+    from aiogram.types import InputRichMessage
+
+    await message.bot.send_rich_message(
+        chat_id=message.chat.id,
+        rich_message=InputRichMessage(html=rich_html),
+    )
+
+
 @router.message(Command("admin"))
 async def admin_help(message: Message):
     if not is_admin(message.from_user.id):
@@ -1169,6 +1209,21 @@ async def list_users(message: Message):
         f"👥 <b>{escape(filter_label)}</b>\n"
         f"Гонка: <b>{race_title_safe}</b> · найдено: <b>{len(rows)}</b>"
     )
+
+    if filter_arg == "all":
+        try:
+            await send_users_all_rich(
+                message,
+                build_users_all_rich_html(race_title, rows),
+            )
+            return
+        except TelegramAPIError:
+            logger.exception(
+                "Failed to send rich user list; falling back to HTML pages: "
+                "race_id=%s",
+                race_id,
+            )
+
     blocks = []
     for index, (tg_id, fio, status, created_at) in enumerate(rows, start=1):
         status_label = escape(STATUS_LABELS.get(status, status))

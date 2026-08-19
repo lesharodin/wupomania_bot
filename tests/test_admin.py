@@ -155,7 +155,7 @@ class AdminUserListTests(unittest.IsolatedAsyncioTestCase):
             patch.object(admin, "is_admin", return_value=True),
             patch.object(
                 admin,
-                "send_users_all_rich",
+                "send_users_rich",
                 new=AsyncMock(),
             ) as send_rich,
         ):
@@ -169,6 +169,54 @@ class AdminUserListTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Петр Второй", response)
         self.assertIn("Race &amp; Test", response)
         self.assertNotIn("video_system", response)
+
+    async def test_users_paid_all_includes_both_paid_statuses(self):
+        with self.connection() as conn:
+            conn.execute("""
+                INSERT INTO race_slots (race_id, status, user_id)
+                VALUES (1, 'paid', 300)
+            """)
+            conn.execute("""
+                INSERT INTO race_entries (
+                    race_id, telegram_id, slot_id, status, created_at
+                ) VALUES (1, 300, 3, 'form_confirmed', '2026-01-03T00:00:00')
+            """)
+            conn.commit()
+
+        message = self.message("/users paid_all")
+        with (
+            patch.object(admin, "get_connection", self.connection),
+            patch.object(admin, "is_admin", return_value=True),
+            patch.object(
+                admin,
+                "send_users_rich",
+                new=AsyncMock(),
+            ) as send_rich,
+        ):
+            await admin.list_users(message)
+
+        response = send_rich.await_args.args[1]
+        self.assertIn("Все оплатившие", response)
+        self.assertIn("Иван &lt;Пилот&gt;", response)
+        self.assertIn("Друг Без Оплаты", response)
+        self.assertNotIn("Петр Второй", response)
+
+    async def test_users_profiles_uses_rich_table_without_status(self):
+        message = self.message("/users profiles")
+        with (
+            patch.object(admin, "get_connection", self.connection),
+            patch.object(admin, "is_admin", return_value=True),
+            patch.object(
+                admin,
+                "send_users_rich",
+                new=AsyncMock(),
+            ) as send_rich,
+        ):
+            await admin.list_users(message)
+
+        response = send_rich.await_args.args[1]
+        self.assertIn("Все профили", response)
+        self.assertNotIn("<th>Статус</th>", response)
 
     async def test_unknown_filter_is_rejected(self):
         message = await self.call_users("/users unknown")

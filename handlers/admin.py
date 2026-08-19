@@ -57,6 +57,7 @@ ADMIN_HELP = """
 <code>/users profiles</code> — все профили в базе
 <code>/users reserved</code> — ожидают оплату
 <code>/users paid</code> — оплатили, но не подтвердили форму
+<code>/users paid_all</code> — все оплатившие, независимо от формы
 <code>/users form_confirmed</code> — полностью записаны
 <code>/users waitlist</code> — лист ожидания
 <code>/users expired</code> — истекшие резервы
@@ -74,6 +75,7 @@ USER_FILTERS = {
     "reserved": "reserved",
     "paid": "paid",
     "not_form": "paid",
+    "paid_all": ("paid", "form_confirmed"),
     "form_confirmed": "form_confirmed",
     "waitlist": "waitlist",
     "expired": "expired",
@@ -103,38 +105,47 @@ def build_user_pages(header: str, blocks: list[str]) -> list[str]:
     ]
 
 
-def build_users_all_rich_html(
-    race_title: str,
+def build_users_rich_html(
+    title: str,
+    subtitle: str,
     rows: list[tuple],
+    *,
+    include_status: bool = True,
 ) -> str:
     table_rows = []
     for index, (tg_id, fio, status, _) in enumerate(rows, start=1):
+        status_cell = (
+            f"<td>{escape(STATUS_LABELS.get(status, status))}</td>"
+            if include_status
+            else ""
+        )
         table_rows.append(
             "<tr>"
             f"<td>{index}</td>"
             f"<td><a href='tg://user?id={tg_id}'>"
             f"{escape(fio or 'Без ФИО')}</a></td>"
             f"<td><code>{tg_id}</code></td>"
-            f"<td>{escape(STATUS_LABELS.get(status, status))}</td>"
+            f"{status_cell}"
             "</tr>"
         )
 
+    status_header = "<th>Статус</th>" if include_status else ""
     table = (
         "<table bordered striped>"
         "<tr><th>№</th><th>Участник</th><th>Telegram ID</th>"
-        "<th>Статус</th></tr>"
+        f"{status_header}</tr>"
         f"{''.join(table_rows)}"
         "</table>"
     )
     return (
-        "<h3>👥 Все участники гонки</h3>"
-        f"<p>Гонка: <b>{escape(race_title or 'Без названия')}</b></p>"
+        f"<h3>👥 {escape(title)}</h3>"
+        f"<p>{escape(subtitle)}</p>"
         f"<details><summary>Показать список — {len(rows)}</summary>"
         f"{table}</details>"
     )
 
 
-async def send_users_all_rich(message: Message, rich_html: str):
+async def send_users_rich(message: Message, rich_html: str):
     from aiogram.types import InputRichMessage
 
     await message.bot.send_rich_message(
@@ -1142,8 +1153,13 @@ async def list_users(message: Message):
                 """
                 params = [race_id]
                 if status_filter:
-                    query += " AND re.status = ?"
-                    params.append(status_filter)
+                    if isinstance(status_filter, tuple):
+                        placeholders = ", ".join("?" for _ in status_filter)
+                        query += f" AND re.status IN ({placeholders})"
+                        params.extend(status_filter)
+                    else:
+                        query += " AND re.status = ?"
+                        params.append(status_filter)
                 query += " ORDER BY re.created_at, re.id"
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
@@ -1153,6 +1169,26 @@ async def list_users(message: Message):
             "👥 <b>Все профили</b>\n"
             f"Всего: <b>{len(profile_rows)}</b>"
         )
+        rich_rows = [
+            (tg_id, fio, None, None)
+            for tg_id, fio in profile_rows
+        ]
+        try:
+            await send_users_rich(
+                message,
+                build_users_rich_html(
+                    "Все профили",
+                    f"Профилей в базе: {len(profile_rows)}",
+                    rich_rows,
+                    include_status=False,
+                ),
+            )
+            return
+        except TelegramAPIError:
+            logger.exception(
+                "Failed to send rich profile list; falling back to HTML pages"
+            )
+
         blocks = [
             (
                 f"{index}. <a href='tg://user?id={tg_id}'>"
@@ -1200,29 +1236,36 @@ async def list_users(message: Message):
         )
         return
 
-    filter_label = (
-        "все участники"
-        if filter_arg == "all"
-        else STATUS_LABELS.get(USER_FILTERS[filter_arg], filter_arg)
+    filter_labels = {
+        "all": "Все участники",
+        "paid_all": "Все оплатившие",
+    }
+    filter_label = filter_labels.get(
+        filter_arg,
+        STATUS_LABELS.get(USER_FILTERS[filter_arg], filter_arg),
     )
     header = (
         f"👥 <b>{escape(filter_label)}</b>\n"
         f"Гонка: <b>{race_title_safe}</b> · найдено: <b>{len(rows)}</b>"
     )
 
-    if filter_arg == "all":
-        try:
-            await send_users_all_rich(
-                message,
-                build_users_all_rich_html(race_title, rows),
-            )
-            return
-        except TelegramAPIError:
-            logger.exception(
-                "Failed to send rich user list; falling back to HTML pages: "
-                "race_id=%s",
-                race_id,
-            )
+    try:
+        await send_users_rich(
+            message,
+            build_users_rich_html(
+                filter_label,
+                f"Гонка: {race_title or 'Без названия'}",
+                rows,
+            ),
+        )
+        return
+    except TelegramAPIError:
+        logger.exception(
+            "Failed to send rich user list; falling back to HTML pages: "
+            "race_id=%s filter=%s",
+            race_id,
+            filter_arg,
+        )
 
     blocks = []
     for index, (tg_id, fio, status, created_at) in enumerate(rows, start=1):
